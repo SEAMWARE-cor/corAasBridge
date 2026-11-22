@@ -63,13 +63,15 @@ echo
 echo
 
 
-echo "04. The inventory from the operational submodel - its model, the Operations with their variables"
-echo "================================================================================================="
+echo "04. The inventory from the operational submodel - its model, the Operations with their variables and endpoints"
+echo "==============================================================================================================="
 curl -s "localhost:$AAS_PORT/admin/bridges/aas/inventory?from=$(urlEncode https://acme.example/ids/sm/press-17/operational)" | python3 -c 'import sys, json
 m = json.load(sys.stdin)
 print(m["node"], m["id"], m["name"])
 for c in m["children"]:
     print(" ", c["node"], c["name"], c.get("id", "-"), json.dumps(c.get("value")), json.dumps(c.get("input")), json.dumps(c.get("output")))
+    if "endpoint" in c:
+        print("    endpoint", c["endpoint"])
 for r in m.get("references", []):
     print("  reference", r["type"], r["target"])'
 echo
@@ -257,16 +259,19 @@ https://acme.example/ids/aas/press-17 available - in valuesIn=0 valuesOut=-
 }
 
 
-04. The inventory from the operational submodel - its model, the Operations with their variables
-=================================================================================================
+04. The inventory from the operational submodel - its model, the Operations with their variables and endpoints
+===============================================================================================================
 submodel https://acme.example/ids/sm/press-17/operational OperationalData
   property Pressure https://acme.example/ids/sm/press-17/operational#Pressure 212.5 null null
   property Running https://acme.example/ids/sm/press-17/operational#Running true null null
   property Mode https://acme.example/ids/sm/press-17/operational#Mode "auto" null null
   property PressureRange https://acme.example/ids/sm/press-17/operational#PressureRange {"min": 0, "max": 400} null null
   operation SetSpeed https://acme.example/ids/sm/press-17/operational#SetSpeed null [{"name": "speed", "valueType": "xs:double"}, {"name": "ramp", "valueType": "xs:boolean"}] [{"name": "previous", "valueType": "xs:double"}]
+    endpoint aas+http://localhost:REGEX([0-9]+)/submodels/aHR0cHM6Ly9hY21lLmV4YW1wbGUvaWRzL3NtL3ByZXNzLTE3L29wZXJhdGlvbmFs/submodel-elements/SetSpeed
   operation Stop https://acme.example/ids/sm/press-17/operational#Stop null [] []
+    endpoint aas+http://localhost:REGEX([0-9]+)/submodels/aHR0cHM6Ly9hY21lLmV4YW1wbGUvaWRzL3NtL3ByZXNzLTE3L29wZXJhdGlvbmFs/submodel-elements/Stop
   operation Log https://acme.example/ids/sm/press-17/operational#Log null [{"name": "lines", "valueType": "xs:string"}] [{"name": "count", "valueType": "xs:int"}]
+    endpoint aas+http://localhost:REGEX([0-9]+)/submodels/aHR0cHM6Ly9hY21lLmV4YW1wbGUvaWRzL3NtL3ByZXNzLTE3L29wZXJhdGlvbmFs/submodel-elements/Log
   reference Documentation https://acme.example/ids/sm/press-17/nameplate
   reference Certificate https://certs.example/p17
 

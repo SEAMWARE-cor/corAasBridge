@@ -28,7 +28,7 @@ part of the model.
 | ReferenceElement | a reference of the node it is in: its idShort, its target the reference's key (more keys: `<first>#<the others, '.'-joined>`) | Relationship to an entity of the model, else Property |
 | SubmodelElementCollection | `collection` | by `attributeLayout` |
 | SubmodelElementList | of Properties: a leaf, `attributeType` ListProperty; of references: a reference each; of anything else: a collection, its items named by their index | ListProperty, ListRelationship, by `attributeLayout` |
-| Operation | `operation`, its `input` and `output` variables | no attribute - a service (below) |
+| Operation | `operation`, its `input` and `output` variables, and `endpoint` - where the bridge invokes it (below) | no attribute - a Service Registration of its entity, that endpoint |
 | semanticId | `semanticIds` (the reference's first key) | a `semanticId` sub-Property |
 
 Entity, RelationshipElement, AnnotatedRelationshipElement, Capability and BasicEventElement are not mapped,

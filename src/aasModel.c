@@ -742,6 +742,28 @@ static char* attachmentUrl(Walk* wP, const char* path)
 
 // -----------------------------------------------------------------------------
 //
+// operationEndpoint - where the bridge invokes an Operation: its Service Registration's endpoint
+// (aas+http[s]://<host>:<port><base path>/submodels/<id, base64url>/submodel-elements/<idShortPath>)
+//
+static char* operationEndpoint(Walk* wP, const char* path)
+{
+  char* pathEnc = aasPathEncode(path);
+  char  buf[4096];
+
+  if (pathEnc == NULL)
+    return NULL;
+
+  snprintf(buf, sizeof(buf), "aas+%s://%s:%d%s/submodels/%s/submodel-elements/%s",
+           (wP->tP->tls == true) ? "https" : "http", wP->tP->host, wP->tP->port, wP->tP->basePath, wP->submodelB64, pathEnc);
+  free(pathEnc);
+
+  return corAllocStrdup(wP->kaP, buf);
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
 // leafNode - a leaf: { "node": "property", "id", "name", "value", ... }
 //
 static CorNode* leafNode(Walk* wP, CorNode* elementP, const char* name, const char* id, CorNode* valueP)
@@ -1038,6 +1060,11 @@ static void elementAdd(Walk* wP, CorNode* parentP, CorNode* elementP, const char
     corTreeChildAdd(opP, corTreeString(kaP, "node", "operation"));
     corTreeChildAdd(opP, corTreeString(kaP, "id",   leafId(wP, path)));
     corTreeChildAdd(opP, corTreeString(kaP, "name", (char*) idShort));
+
+    char* endpoint = operationEndpoint(wP, path);
+    if (endpoint != NULL)
+      corTreeChildAdd(opP, corTreeString(kaP, "endpoint", endpoint));
+
     semanticIdsAdd(kaP, opP, elementP);
     corTreeChildAdd(opP, variables(kaP, "input",  elementP, "inputVariables",  "inoutputVariables"));
     corTreeChildAdd(opP, variables(kaP, "output", elementP, "outputVariables", "inoutputVariables"));

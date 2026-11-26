@@ -51,9 +51,9 @@ endif
 # process at dlopen - a plugin is built against the headers of the broker it is loaded into. Only the
 # transport's own library is linked here: OpenSSL (a server on https, with a context of the plugin's own).
 #
-LIBS          = -lpthread -lssl -lcrypto -lm
+LIBS          = -lpthread -lssl -lcrypto -lmosquitto -lm
 
-SOURCES       = src/aasRegister.c src/aasBridge.c src/aasModel.c src/aasHttp.c
+SOURCES       = src/aasRegister.c src/aasBridge.c src/aasModel.c src/aasHttp.c src/aasPush.c
 OBJS          = $(SOURCES:.c=.o)
 DEPS          = $(SOURCES:.c=.d)
 

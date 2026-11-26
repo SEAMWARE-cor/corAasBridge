@@ -1,0 +1,164 @@
+#
+# FILE            aas_push.test
+#
+# Copyright 2026 Seamware
+# SPDX-License-Identifier: Apache-2.0
+#
+# Push (opt-in): "push": { "url": "mqtt://<host>[:<port>]" } - the change events the AAS server publishes to an
+# MQTT broker are subscribed to, and an event about a submodel makes its AssetChannels read at once. Polling goes
+# on. The AssetChannel is polled every 60 s here: a value in within seconds came by the event. The mock publishes
+# a change at the source as the server it plays does (--push), to a mosquitto the test starts:
+#
+#   no push                        the change waits for the next poll: not in after 3 s
+#   BaSyx's event                  sm-repository/sm-repo/submodels/<id>/submodelElements/Pressure/value/updated: in
+#   FA³ST's event                  events/ValueChangeEventMessage, the Submodel key in the payload: in
+#   the MQTT broker gone, back     polled only meanwhile (the log says it, once); reconnected: events again
+#   push.url not mqtt://           the broker does not start
+#
+# REQUIRE_FEATURE: ASSET_CHANNELS
+#
+--NAME--
+aas bridge - push: BaSyx's and FA³ST's MQTT change events make the AssetChannel read at once
+
+--TAGS--
+bridge aas
+
+--INIT--
+rm -rf "${AAS_TEST_DIR:?}"
+mkdir -p "$AAS_TEST_DIR"
+mqttStart
+mockStart --push basyx
+
+--RUN--
+SH=https://acme.example/ids/aas/press-17
+OP=https://acme.example/ids/sm/press-17/operational
+D=$AAS_TEST_DIR
+config() {  # config [push] - the bridge configuration, polled every 60 s
+  cat > $D/bridges.json <<J
+{ "aas": { "server": { "url": "http://localhost:$AAS_MOCK_PORT" } $1,
+           "ngsild": { "defaultEntity": false, "assetChannels": {
+             "$SH": { "entities": "natural", "channelInfo": [ { "key": "pollInterval", "value": "PT60S" } ] } } } } }
+J
+}
+published() {  # published - the events the mock published since the last, the id by name
+  grep -E '^(not )?published ' $D/server.log | sed "s|$(python3 -c 'import base64, sys; print(base64.urlsafe_b64encode(sys.argv[1].encode()).decode())' $OP)|<operational>|"
+  : > $D/server.log
+}
+
+echo "01. No push - a change at the source waits for the next poll (60 s): not in after 3 s"
+echo "====================================================================================="
+config
+brokerStart
+entityAwait $OP pressure 212.5
+mockSet $OP Pressure '"220"'
+sleep 3
+entityGet $OP pressure keyValues
+published
+echo
+echo
+
+
+echo "02. push, BaSyx's event - in at once"
+echo "===================================="
+config ', "push": { "url": "mqtt://localhost:'$AAS_MQTT_PORT'" }'
+brokerStart
+entityAwait $OP pressure 220
+mqttSubscribed 'sm-repository/+/submodels/#' && mqttSubscribed 'events/+' && echo "subscribed: BaSyx's topics, FA³ST's"
+mockSet $OP Pressure '"230"'
+entityAwait $OP pressure 230 3
+entityGet $OP pressure keyValues
+published
+echo
+echo
+
+
+echo "03. FA³ST's event - in at once"
+echo "=============================="
+mockStart --push faaast
+mockSet $OP Pressure '"240"'
+entityAwait $OP pressure 240 3
+entityGet $OP pressure keyValues
+published
+echo
+echo
+
+
+echo "04. The MQTT broker gone - polled only, said once; back - reconnected, events again"
+echo "==================================================================================="
+mqttStop
+sleep 2
+grep -o 'aas: push: the connection to the MQTT broker .* lost - polled only, until it is back' $D/broker.log | sort | uniq -c | sed 's/^ *//'
+mqttStart
+mqttSubscribed 'events/+' 35 && echo "subscribed again"
+mockSet $OP Pressure '"250"'
+entityAwait $OP pressure 250 3
+entityGet $OP pressure keyValues
+echo
+echo
+
+
+echo "05. push.url not mqtt:// - the broker does not start"
+echo "===================================================="
+brokerStop
+config ', "push": { "url": "http://localhost:'$AAS_MQTT_PORT'" }'
+brokerStart 2> /dev/null || echo "brokerStart failed"
+grep -o 'aas: push.url - mqtt://<host>\[:<port>\], .*' $D/broker.log
+echo
+echo
+
+
+--TEARDOWN--
+brokerStop
+mockStop
+mqttStop
+rm -f "${AAS_TEST_DIR:?}/bridges.json"
+
+--EXPECT--
+01. No push - a change at the source waits for the next poll (60 s): not in after 3 s
+=====================================================================================
+{
+  "id": "https://acme.example/ids/sm/press-17/operational",
+  "pressure": 212.5,
+  "type": "OperationalData"
+}
+published sm-repository/sm-repo/submodels/<operational>/submodelElements/Pressure/value/updated
+
+
+02. push, BaSyx's event - in at once
+====================================
+subscribed: BaSyx's topics, FA³ST's
+{
+  "id": "https://acme.example/ids/sm/press-17/operational",
+  "pressure": 230,
+  "type": "OperationalData"
+}
+published sm-repository/sm-repo/submodels/<operational>/submodelElements/Pressure/value/updated
+
+
+03. FA³ST's event - in at once
+==============================
+{
+  "id": "https://acme.example/ids/sm/press-17/operational",
+  "pressure": 240,
+  "type": "OperationalData"
+}
+published events/ValueChangeEventMessage
+
+
+04. The MQTT broker gone - polled only, said once; back - reconnected, events again
+===================================================================================
+1 aas: push: the connection to the MQTT broker localhost:18883 lost - polled only, until it is back
+subscribed again
+{
+  "id": "https://acme.example/ids/sm/press-17/operational",
+  "pressure": 250,
+  "type": "OperationalData"
+}
+
+
+05. push.url not mqtt:// - the broker does not start
+====================================================
+brokerStart failed
+aas: push.url - mqtt://<host>[:<port>], the MQTT broker the AAS server publishes its events to
+
+

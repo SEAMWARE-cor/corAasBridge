@@ -1064,6 +1064,37 @@ static void queueDrain(Queue* qP)
 
 // -----------------------------------------------------------------------------
 //
+// aasSubmodelChanged -
+//
+int aasSubmodelChanged(const char* id)
+{
+  int n = 0;
+
+  pthread_mutex_lock(&mutex);
+
+  for (int ix = 0; ix < endpoints; ix++)
+  {
+    Endpoint* epP = endpointV[ix];
+
+    for (int lx = 0; lx < epP->leaves; lx++)
+    {
+      if ((epP->leafV[lx].submodelId != NULL) && (strcmp(epP->leafV[lx].submodelId, id) == 0))
+      {
+        epP->nextPoll = 0;
+        n++;
+        break;
+      }
+    }
+  }
+
+  pthread_mutex_unlock(&mutex);
+  return n;
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
 // aasBridgeOpen -
 //
 int aasBridgeOpen(const AasTarget* targetP, AasTarget* _registryP, const char* _authorization, const AasTls* tlsP, const BridgeBroker* _brokerP)

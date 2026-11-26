@@ -58,6 +58,7 @@ typedef struct Walk
   bool         oom;
   const char*  submodelId;                            // the submodel being walked
   const char*  submodelB64;                           // its id, base64url
+  CorNode*     relsP;                                 // the RelationshipElements read: { type, first, target }
 } Walk;
 
 
@@ -1154,6 +1155,28 @@ static void elementAdd(Walk* wP, CorNode* parentP, CorNode* elementP, const char
     if (target != NULL)
       referenceAdd(kaP, parentP, idShort, target);
   }
+  else if (strcmp(modelType, "RelationshipElement") == 0)
+  {
+    //
+    // A reference of the node 'first' names, to 'second' - that node found once the whole shell is read,
+    // relationshipsAdd
+    //
+    char* first  = referenceTarget(kaP, member(elementP, "first",  CorObject));
+    char* second = referenceTarget(kaP, member(elementP, "second", CorObject));
+
+    if ((first == NULL) || (second == NULL))
+      return;
+
+    if (wP->relsP == NULL)
+      wP->relsP = corTreeArray(kaP, NULL);
+
+    CorNode* relP = corTreeObject(kaP, NULL);
+
+    corTreeChildAdd(relP, corTreeString(kaP, "type",   (char*) idShort));
+    corTreeChildAdd(relP, corTreeString(kaP, "first",  first));
+    corTreeChildAdd(relP, corTreeString(kaP, "target", second));
+    corTreeChildAdd(wP->relsP, relP);
+  }
   else if (strcmp(modelType, "SubmodelElementCollection") == 0)
   {
     CorNode* collP = corTreeObject(kaP, NULL);
@@ -1187,7 +1210,7 @@ static void elementAdd(Walk* wP, CorNode* parentP, CorNode* elementP, const char
   }
 
   //
-  // Entity, RelationshipElement, AnnotatedRelationshipElement, Capability, BasicEventElement: not mapped
+  // Entity, AnnotatedRelationshipElement, Capability, BasicEventElement: not mapped
   //
 }
 
@@ -1271,6 +1294,59 @@ static CorNode* submodelNode(Walk* wP, CorNode* submodelP, const char* b64)
   wP->submodelB64 = NULL;
 
   return nodeP;
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
+// nodeWithId - the node of the tree whose id is 'id'
+//
+static CorNode* nodeWithId(CorNode* nodeP, const char* id)
+{
+  const char* nodeId = str(nodeP, "id");
+
+  if ((nodeId != NULL) && (strcmp(nodeId, id) == 0))
+    return nodeP;
+
+  CorNode* childrenP = member(nodeP, "children", CorArray);
+
+  for (CorNode* childP = (childrenP != NULL) ? childrenP->value.head : NULL; childP != NULL; childP = childP->next)
+  {
+    CorNode* foundP = nodeWithId(childP, id);
+
+    if (foundP != NULL)
+      return foundP;
+  }
+
+  return NULL;
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
+// relationshipsAdd - each RelationshipElement a reference of the node its 'first' names (the shell, a
+// submodel, an element), to its 'second'; a 'first' that is no node of the model read: not mapped
+//
+static void relationshipsAdd(Walk* wP, CorNode* rootP, const char* rootId)
+{
+  for (CorNode* relP = (wP->relsP != NULL) ? wP->relsP->value.head : NULL; relP != NULL; relP = relP->next)
+  {
+    const char* type   = str(relP, "type");
+    const char* first  = str(relP, "first");
+    CorNode*    nodeP  = nodeWithId(rootP, first);
+
+    if (nodeP == NULL)
+    {
+      COR_W("aas: '%s': RelationshipElement '%s' - its first, '%s', is not in the model: not mapped", rootId, type, first);
+      continue;
+    }
+
+    referenceAdd(wP->kaP, nodeP, type, str(relP, "target"));
+  }
+
+  wP->relsP = NULL;
 }
 
 
@@ -1483,7 +1559,7 @@ static void skeletonOf(Skeleton* sP, CorNode* nodeP)
 //
 int aasModelRead(AasTarget* tP, CorAlloc* kaP, const char* rootId, AasRead* rP, char* whyBuf, int whyLen)
 {
-  Walk  walk = { tP, kaP, rP, 0, false, NULL, NULL };
+  Walk  walk = { tP, kaP, rP, 0, false, NULL, NULL, NULL };
   char* b64  = aasBase64Url(rootId);
   char  path[4096];
 
@@ -1525,6 +1601,9 @@ int aasModelRead(AasTarget* tP, CorAlloc* kaP, const char* rootId, AasRead* rP, 
   }
 
   free(b64);
+
+  if (status == 200)
+    relationshipsAdd(&walk, rootP, rootId);
 
   if ((status == 200) && (walk.oom == true))
   {

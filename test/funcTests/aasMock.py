@@ -42,6 +42,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 NAMEPLATE = "https://acme.example/ids/sm/press-17/nameplate"
 OPERATIONAL = "https://acme.example/ids/sm/press-17/operational"
 SHELL = "https://acme.example/ids/aas/press-17"
+LINE3 = "https://acme.example/ids/aas/line-3"
+LAYOUT = "https://acme.example/ids/sm/line-3/layout"
 
 
 def ext(value):
@@ -65,6 +67,18 @@ def mlp(idShort, texts, semanticId=None):
   return e
 
 
+def mref(*keys):
+  # a ModelReference - its keys (type, value)
+  return {"type": "ModelReference", "keys": [{"type": t, "value": v} for t, v in keys]}
+
+
+def rel(idShort, first, second):
+  e = {"modelType": "RelationshipElement", "idShort": idShort, "first": first}
+  if second is not None:
+    e["second"] = second
+  return e
+
+
 def var(idShort, valueType):
   return {"value": {"modelType": "Property", "idShort": idShort, "valueType": valueType}}
 
@@ -76,7 +90,10 @@ SHELLS = [
                  {"type": "ModelReference", "keys": [{"type": "Submodel", "value": OPERATIONAL}]}]},
   {"modelType": "AssetAdministrationShell", "id": "https://acme.example/ids/aas/press-18", "idShort": "Press18",
    "assetInformation": {"assetKind": "Instance"},
-   "submodels": [{"type": "ModelReference", "keys": [{"type": "Submodel", "value": "https://acme.example/ids/sm/none"}]}]}
+   "submodels": [{"type": "ModelReference", "keys": [{"type": "Submodel", "value": "https://acme.example/ids/sm/none"}]}]},
+  {"modelType": "AssetAdministrationShell", "id": LINE3, "idShort": "Line3",
+   "assetInformation": {"assetKind": "Instance"},
+   "submodels": [mref(("Submodel", LAYOUT))]}
 ]
 
 SUBMODELS = [
@@ -126,7 +143,18 @@ SUBMODELS = [
       "outputVariables": [var("previous", "xs:double")]},
      {"modelType": "Operation", "idShort": "Stop"},
      {"modelType": "Operation", "idShort": "Log", "inputVariables": [var("lines", "xs:string")],
-      "outputVariables": [var("count", "xs:int")]}]}
+      "outputVariables": [var("count", "xs:int")]}]},
+  {"modelType": "Submodel", "id": LAYOUT, "idShort": "Layout",
+   "submodelElements": [
+     prop("Speed", "xs:double", "1.2"),
+     {"modelType": "SubmodelElementCollection", "idShort": "Infeed", "value": [prop("Rate", "xs:int", "40")]},
+     rel("Feeds",     mref(("Submodel", LAYOUT)),                                           mref(("AssetAdministrationShell", SHELL))),
+     rel("Drives",    mref(("Submodel", LAYOUT), ("Property", "Speed")),                    mref(("Submodel", OPERATIONAL), ("Property", "Pressure"))),
+     rel("LimitedBy", mref(("Submodel", LAYOUT), ("SubmodelElementCollection", "Infeed"),
+                           ("Property", "Rate")),                                           mref(("Submodel", LAYOUT), ("Property", "Speed"))),
+     rel("LocatedIn", mref(("AssetAdministrationShell", LINE3)),                            ext("https://sites.example/hall-2")),
+     rel("Supplies",  mref(("Submodel", NAMEPLATE)),                                        mref(("AssetAdministrationShell", LINE3))),
+     rel("Dangling",  mref(("Submodel", LAYOUT)),                                           None)]}
 ]
 
 lock  = threading.Lock()

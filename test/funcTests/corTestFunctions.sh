@@ -423,7 +423,7 @@ basyxEnv() {
     *)
       docker network create aas-test > /dev/null 2>&1   # BaSyx and its MQTT broker; the host is its gateway
       AAS_BASYX_URL="http://127.0.0.1:$AAS_BASYX_PORT"
-      AAS_BASYX_MQTT_URL="mqtt://localhost:$AAS_BASYX_MQTT_PORT"
+      AAS_BASYX_MQTT_URL="mqtt://127.0.0.1:$AAS_BASYX_MQTT_PORT"   # published on 127.0.0.1 only: not localhost (::1 first in CI)
       AAS_DELEGATE_HOST="${AAS_DELEGATE_HOST:-$(docker network inspect aas-test -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null)}"
       ;;
   esac
@@ -501,7 +501,7 @@ AAS_FAAAST_MQTT_PORT="${AAS_FAAAST_MQTT_PORT:-18886}"
 faaastEnv() {
   case "$AAS_FAAAST" in
     http://*|https://*) AAS_FAAAST_URL="$AAS_FAAAST"; AAS_FAAAST_MQTT_URL="${AAS_FAAAST_MQTT_URL:-}" ;;
-    *)                  AAS_FAAAST_URL="https://localhost:$AAS_FAAAST_PORT/api/v3.0"; AAS_FAAAST_MQTT_URL="mqtt://localhost:$AAS_FAAAST_MQTT_PORT" ;;
+    *)                  AAS_FAAAST_URL="https://localhost:$AAS_FAAAST_PORT/api/v3.0"; AAS_FAAAST_MQTT_URL="mqtt://127.0.0.1:$AAS_FAAAST_MQTT_PORT" ;;
   esac
   export AAS_FAAAST_URL AAS_FAAAST_MQTT_URL
 }
@@ -510,7 +510,8 @@ faaastEnv() {
 # faaastStart - FA³ST with its events on MQTT (MessageBusMqtt, its own broker): an image, in docker - the
 # configuration the message bus only, FA³ST's defaults else (https on 443, a self-signed certificate); a jar
 # (<...>.jar: the release's starter, run here with java - CI) - the HTTP endpoint on $AAS_FAAAST_PORT too.
-# A URL: started already, by whoever gave it (its events: $AAS_FAAAST_MQTT_URL, if any)
+# A URL: started already, by whoever gave it (its events: $AAS_FAAAST_MQTT_URL, if any). Its broker on 127.0.0.1
+# (the jar's, docker's published port) - the URL 127.0.0.1, not localhost: ::1 first in CI
 #
 faaastStart() {
   faaastEnv

@@ -150,7 +150,8 @@ mockStart() {
 # only a client with a certificate of the same CA ($AAS_TEST_DIR/mqtt-client.pem, mqtt-client.key). The client
 # publishing for the mock (no TLS, no user) gets a plain listener of its own, $AAS_MQTT_PORT + 1, when the main
 # one is not plain - aasMock's --mqtt-port. mqttStop. mqttSubscribed <topic> [secs] - wait until a client has
-# subscribed to <topic> at it
+# subscribed to <topic> at it. Its listeners on localhost: IPv4 and IPv6 - "localhost" may be ::1 first (CI's
+# containers), and libmosquitto tries a name's first address only
 #
 AAS_MQTT_PORT="${AAS_MQTT_PORT:-18883}"
 mqttStart() {
@@ -168,9 +169,9 @@ mqttStart() {
 
   local conf="$d/mqtt.conf"
   if [ "$tls" = no ] && [ -z "$auth" ]; then
-    printf 'listener %s 127.0.0.1\nallow_anonymous true\n' "$AAS_MQTT_PORT" > "$conf"
+    printf 'listener %s localhost\nallow_anonymous true\n' "$AAS_MQTT_PORT" > "$conf"
   else
-    printf 'per_listener_settings true\nlistener %s 127.0.0.1\n' "$AAS_MQTT_PORT" > "$conf"
+    printf 'per_listener_settings true\nlistener %s localhost\n' "$AAS_MQTT_PORT" > "$conf"
     if [ -n "$auth" ]; then
       : > "$d/mqtt.passwd"
       mosquitto_passwd -b "$d/mqtt.passwd" "${auth%%:*}" "${auth#*:}" > /dev/null 2>&1
@@ -194,7 +195,7 @@ mqttStart() {
       fi
       chmod 644 "$d"/mqtt-*.key
     fi
-    printf 'listener %s 127.0.0.1\nallow_anonymous true\n' "$((AAS_MQTT_PORT + 1))" >> "$conf"
+    printf 'listener %s localhost\nallow_anonymous true\n' "$((AAS_MQTT_PORT + 1))" >> "$conf"
   fi
 
   mosquitto -v -c "$conf" > "$AAS_TEST_DIR/mqtt.log" 2>&1 &

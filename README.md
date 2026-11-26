@@ -190,7 +190,18 @@ values over as a poll does. Polling goes on: an event missed, or the broker not 
 | Eclipse BaSyx | `sm-repository/<repo>/submodels/<id, base64url>/submodelElements/<idShortPath>/value/updated`, `.../updated`, `.../created`, ...; `sm-repository/<repo>/submodels/{created,updated}` (the submodel in the payload) | `BASYX_FEATURE_MQTT_ENABLED=true`, `MQTT_HOSTNAME`, `MQTT_PORT`, `MQTT_CLIENTID` - an external broker |
 | FA³ST Service | `events/<Event>Message` (`ValueChangeEventMessage`, `ElementCreateEventMessage`, ...), the submodel the first key of the payload's `element` | `"messageBus": { "@class": "de.fraunhofer.iosb.ilt.faaast.service.messagebus.mqtt.MessageBusMqtt", "host": "0.0.0.0", "port": 1883, "useInternalServer": true }` - its own broker (`host`: it listens on 127.0.0.1 only otherwise), or an external one |
 
-No credentials and no TLS to the MQTT broker yet: `mqtt://` only.
+The MQTT broker's own credentials and TLS - the AAS server's never go to it:
+
+| `push` member | |
+|---|---|
+| `url` | `mqtt://<host>[:<port>]` (1883), or `mqtts://<host>[:<port>]` (8883): TLS |
+| `usernameEnv`, `passwordEnv` | the environment variables that hold the user and password - never in the file. Set and absent: the plugin is not loaded |
+| `caFile` | mqtts: the PEM of the CAs the broker's certificate is verified against. Absent: the system's (`/etc/ssl/certs`) |
+| `insecure` | mqtts, `true`: the broker's certificate not verified - neither its chain nor its host name |
+| `clientCert`, `clientKey` | mqtts: the plugin's own certificate, for a broker that wants one; the key not encrypted, in `clientCert`'s file when `clientKey` is absent |
+
+A connection that fails says why, once - the broker's refusal (`not authorised`) or the TLS error (`certificate
+verify failed`, `certificate required`); it is tried again, the AssetChannels polled meanwhile.
 
 ## Build and test
 
@@ -214,7 +225,7 @@ booleans as strings only, as BaSyx does; `--oauth2` makes it a token endpoint to
 with a certificate (`aas_oauth2`, `aas_mtls`). It is a registry too (`/registry/shell-descriptors`, the descriptors the
 test gives), and many servers by base path (`/srv-<x>/...`); `--log-requests` logs each request's host and whether
 credentials came with it (`aas_registry`). With `--push basyx|faaast` it publishes a change at the source as
-that server does, to the mosquitto the test starts (`aas_push`).
+that server does, to the mosquitto the test starts (`aas_push`; `mqttStart --tls --auth --client-ca`, `aas_push_auth`).
 
 The broker must have AssetChannels; write-back (`COR_FEATURE_CHANNEL_WRITE_BACK`) for `"both"`, and Service
 Execution for the Operations.

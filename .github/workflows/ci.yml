@@ -113,3 +113,5 @@ jobs:
             stack/bridge/test/funcTests/cases/*.stderr
             /tmp/aas-bridge-test/broker.log
             /tmp/aas-bridge-test/delegate.log
+            /tmp/aas-bridge-test/mqtt.log
+            /tmp/aas-bridge-test/mqtt.conf

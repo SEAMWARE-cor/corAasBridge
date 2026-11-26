@@ -114,7 +114,8 @@ static const char* stringOf(CorNode* objectP, const char* name)
 //   { "aas": { "server": { "url": "https://aas.acme.example/api/v3.0", "authorizationEnv": "AAS_AUTHORIZATION",
 //                          "caFile": "/etc/aas/ca.pem" },
 //              "registry": { "url": "https://registry.acme.example/api/v3.0" },
-//              "push": { "url": "mqtt://mqtt.acme.example:1883" },
+//              "push": { "url": "mqtts://mqtt.acme.example", "usernameEnv": "AAS_MQTT_USER", "passwordEnv": "AAS_MQTT_PASSWORD",
+//                        "caFile": "/etc/aas/mqtt-ca.pem" },
 //              "ngsild": { "assetChannels": { "<shell id>": { "entities": "natural", ... } } } } }
 //
 // "authorizationEnv" names the environment variable that holds the Authorization header's value ("Bearer ...")
@@ -126,7 +127,9 @@ static const char* stringOf(CorNode* objectP, const char* name)
 // "registry": an AAS registry (IDTA-01002's /shell-descriptors) - where a shell and its submodels are read
 // from. The credentials and the certificate go only to server.url's host (scheme, host and port): to the
 // registry, and to a server it names, only if it is that host. "push": the MQTT broker the server publishes its
-// change events to (BaSyx's, FA³ST's) - each event about a submodel makes its AssetChannels read at once.
+// change events to (BaSyx's, FA³ST's) - each event about a submodel makes its AssetChannels read at once. Its
+// own credentials, from the environment (usernameEnv, passwordEnv) and its own TLS (mqtts: caFile, insecure,
+// clientCert, clientKey) - the AAS server's never go to it.
 //
 static int aasInit(const char* configFile, const BridgeBroker* brokerP)
 {
@@ -141,7 +144,7 @@ static int aasInit(const char* configFile, const BridgeBroker* brokerP)
   AasTls      tls      = { NULL, false, NULL, NULL };
   AasTarget   target;
   AasTarget*  registryP = NULL;
-  const char* pushUrl   = NULL;
+  AasPushConfig push    = { NULL, NULL, NULL, NULL, false, NULL, NULL };
 
   corAllocBufferInit(&ka, buf, sizeof(buf), 16 * 1024, NULL, "aas config");
   corJsonCreate(&cj, &ka);
@@ -210,8 +213,26 @@ static int aasInit(const char* configFile, const BridgeBroker* brokerP)
     CorNode* registryNodeP = corTreeLookup(aasP, "registry");
     CorNode* pushNodeP     = corTreeLookup(aasP, "push");
 
-    if ((why == NULL) && (pushNodeP != NULL) && (((pushNodeP->type != CorObject) || ((pushUrl = stringOf(pushNodeP, "url")) == NULL))))
-      why = "push - { \"url\": \"mqtt://<host>[:<port>]\" }, the MQTT broker the AAS server publishes its events to";
+    if ((why == NULL) && (pushNodeP != NULL) && (((pushNodeP->type != CorObject) || ((push.url = stringOf(pushNodeP, "url")) == NULL))))
+      why = "push - { \"url\": \"mqtt[s]://<host>[:<port>]\" }, the MQTT broker the AAS server publishes its events to";
+    else if ((why == NULL) && (pushNodeP != NULL))
+    {
+      CorNode*    pInsecureP  = corTreeLookup(pushNodeP, "insecure");
+      const char* userEnv     = stringOf(pushNodeP, "usernameEnv");
+      const char* passwordEnv = stringOf(pushNodeP, "passwordEnv");
+
+      push.username   = (userEnv     != NULL) ? getenv(userEnv)     : NULL;
+      push.password   = (passwordEnv != NULL) ? getenv(passwordEnv) : NULL;
+      push.caFile     = stringOf(pushNodeP, "caFile");
+      push.insecure   = (pInsecureP != NULL) && (pInsecureP->type == CorBoolean) && (pInsecureP->value.b == true);
+      push.clientCert = stringOf(pushNodeP, "clientCert");
+      push.clientKey  = stringOf(pushNodeP, "clientKey");
+
+      if ((userEnv != NULL) && (push.username == NULL))
+        why = "push.usernameEnv names an environment variable that is not set";
+      else if ((passwordEnv != NULL) && (push.password == NULL))
+        why = "push.passwordEnv names an environment variable that is not set";
+    }
 
     if ((why == NULL) && (registryNodeP != NULL))
     {
@@ -236,9 +257,9 @@ static int aasInit(const char* configFile, const BridgeBroker* brokerP)
       aasTargetRelease(&target);
       why = "the plugin's threads could not be started";
     }
-    else if (pushUrl != NULL)
+    else if (push.url != NULL)
     {
-      if ((why = aasPushStart(pushUrl)) != NULL)
+      if ((why = aasPushStart(&push)) != NULL)
         aasBridgeClose();
     }
   }

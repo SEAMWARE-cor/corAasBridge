@@ -49,7 +49,25 @@ static struct
   char               host[256];
   int                port;
   bool               lost;                            // the connection lost, said once
-} push = { NULL, "", 0, false };
+  bool               connected;                       // connected at least once
+  char               lastError[256];                  // libmosquitto's last error (its log): the TLS failure's OpenSSL text
+} push = { NULL, "", 0, false, false, "" };
+
+
+
+// -----------------------------------------------------------------------------
+//
+// onLog - libmosquitto's errors kept: why a connection failed, better than its error code (a TLS handshake's
+// "certificate verify failed" is MOSQ_ERR_PROTOCOL)
+//
+static void onLog(struct mosquitto* mosqP, void* userData, int level, const char* text)
+{
+  (void) mosqP;
+  (void) userData;
+
+  if ((level == MOSQ_LOG_ERR) && (text != NULL))
+    snprintf(push.lastError, sizeof(push.lastError), "%s", text);
+}
 
 
 
@@ -71,7 +89,30 @@ static void onConnect(struct mosquitto* mosqP, void* userData, int rc)
   mosquitto_subscribe(mosqP, NULL, "events/+", 0);                      // FA³ST (MessageBusMqtt, topicPrefix "events/")
 
   COR_I("aas: push: connected to the MQTT broker %s:%d", push.host, push.port);
-  push.lost = false;
+  push.lost      = false;
+  push.connected = true;
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
+// connectionGone - no connection, or none any more: said once, why - libmosquitto's last error, else rc's text.
+// A connection that fails at once (mosquitto_connect_async) and one that fails in the loop are told alike
+//
+static void connectionGone(int rc)
+{
+  if (push.lost == false)
+  {
+    const char* why = (push.lastError[0] != 0) ? push.lastError : mosquitto_strerror(rc);
+
+    if (push.connected == true)
+      COR_W("aas: push: the connection to the MQTT broker %s:%d lost (%s) - polled only, until it is back", push.host, push.port, why);
+    else
+      COR_W("aas: push: no connection to the MQTT broker %s:%d (%s) - polled only, tried again", push.host, push.port, why);
+    push.lost         = true;
+    push.lastError[0] = 0;
+  }
 }
 
 
@@ -85,11 +126,8 @@ static void onDisconnect(struct mosquitto* mosqP, void* userData, int rc)
   (void) mosqP;
   (void) userData;
 
-  if ((rc != 0) && (push.lost == false))
-  {
-    COR_W("aas: push: the connection to the MQTT broker %s:%d lost - polled only, until it is back", push.host, push.port);
-    push.lost = true;
-  }
+  if (rc != 0)
+    connectionGone(rc);
 }
 
 
@@ -212,12 +250,23 @@ static void onMessage(struct mosquitto* mosqP, void* userData, const struct mosq
 //
 // aasPushStart -
 //
-const char* aasPushStart(const char* url)
+const char* aasPushStart(const AasPushConfig* cP)
 {
-  const char* hostP = (strncmp(url, "mqtt://", 7) == 0) ? &url[7] : NULL;
+  const char* url   = cP->url;
+  bool        tls   = (strncmp(url, "mqtts://", 8) == 0);
+  const char* hostP = (strncmp(url, "mqtt://", 7) == 0) ? &url[7] : (tls == true) ? &url[8] : NULL;
 
   if (hostP == NULL)
-    return "push.url - mqtt://<host>[:<port>], the MQTT broker the AAS server publishes its events to";
+    return "push.url - mqtt[s]://<host>[:<port>], the MQTT broker the AAS server publishes its events to";
+
+  if ((tls == false) && ((cP->caFile != NULL) || (cP->insecure == true) || (cP->clientCert != NULL)))
+    return "push.caFile, insecure, clientCert - the url is not mqtts://";
+
+  if ((cP->clientKey != NULL) && (cP->clientCert == NULL))
+    return "push.clientKey without push.clientCert";
+
+  if ((cP->password != NULL) && (cP->username == NULL))
+    return "push.passwordEnv without push.usernameEnv";
 
   const char* colon = strchr(hostP, ':');
   int         len   = (colon != NULL) ? (int) (colon - hostP) : (int) strcspn(hostP, "/");
@@ -227,7 +276,7 @@ const char* aasPushStart(const char* url)
 
   memcpy(push.host, hostP, len);
   push.host[len] = 0;
-  push.port      = 1883;
+  push.port      = (tls == true) ? 8883 : 1883;
 
   if (colon != NULL)
   {
@@ -245,6 +294,39 @@ const char* aasPushStart(const char* url)
   if ((push.mosqP = mosquitto_new(NULL, true, NULL)) == NULL)
     return "push: the MQTT client could not be made";
 
+  if ((cP->username != NULL) && (mosquitto_username_pw_set(push.mosqP, cP->username, cP->password) != MOSQ_ERR_SUCCESS))
+  {
+    aasPushStop();
+    return "push: the username could not be set";
+  }
+
+  if (tls == true)
+  {
+    //
+    // The broker's certificate: caFile's CAs, else the system's; insecure - not verified at all (neither the
+    // chain nor the host name). The plugin's own: clientCert, its key in clientKey or in the same file
+    //
+    const char* key = (cP->clientKey != NULL) ? cP->clientKey : cP->clientCert;
+    int         rc  = mosquitto_tls_set(push.mosqP, cP->caFile, (cP->caFile == NULL) ? "/etc/ssl/certs" : NULL, cP->clientCert, key, NULL);
+
+    if (rc != MOSQ_ERR_SUCCESS)
+    {
+      static char why[300];
+
+      snprintf(why, sizeof(why), "push: TLS - %s (caFile, clientCert, clientKey: PEM files that can be read, the key not encrypted)",
+               mosquitto_strerror(rc));
+      aasPushStop();
+      return why;
+    }
+
+    if (cP->insecure == true)
+    {
+      mosquitto_tls_opts_set(push.mosqP, 0, NULL, NULL);   // SSL_VERIFY_NONE
+      mosquitto_tls_insecure_set(push.mosqP, true);
+    }
+  }
+
+  mosquitto_log_callback_set(push.mosqP, onLog);
   mosquitto_connect_callback_set(push.mosqP, onConnect);
   mosquitto_disconnect_callback_set(push.mosqP, onDisconnect);
   mosquitto_message_callback_set(push.mosqP, onMessage);
@@ -253,10 +335,7 @@ const char* aasPushStart(const char* url)
   int rc = mosquitto_connect_async(push.mosqP, push.host, push.port, 30);
 
   if (rc != MOSQ_ERR_SUCCESS)
-  {
-    COR_W("aas: push: the MQTT broker %s:%d: %s - tried again", push.host, push.port, mosquitto_strerror(rc));
-    push.lost = true;
-  }
+    connectionGone(rc);                               // the loop tries again
 
   if (mosquitto_loop_start(push.mosqP) != MOSQ_ERR_SUCCESS)
   {
@@ -280,8 +359,10 @@ void aasPushStop(void)
     return;
 
   mosquitto_disconnect(push.mosqP);
-  mosquitto_loop_stop(push.mosqP, true);
+  mosquitto_loop_stop(push.mosqP, true);              // not started yet: MOSQ_ERR_INVAL, harmless
   mosquitto_destroy(push.mosqP);
-  push.mosqP = NULL;
-  push.lost  = false;
+  push.mosqP     = NULL;
+  push.lost         = false;
+  push.connected    = false;
+  push.lastError[0] = 0;
 }

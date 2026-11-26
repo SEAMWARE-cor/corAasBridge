@@ -32,8 +32,9 @@
 #   POST /test/remove   { "submodel", "idShort" }         one removed
 #   POST /test/revoke   {}                                every token given so far no longer valid
 #
-# Each PATCH and each invocation is logged, one line, to the file --log names:
-# "PATCH <submodel idShort>.<idShortPath> <body>", "invoke <submodel idShort>.<idShortPath> <arguments>".
+# Each PATCH, PUT and invocation is logged, one line, to the file --log names:
+# "PATCH <submodel idShort>.<idShortPath> <body>", "PUT <submodel idShort>.<idShortPath> <the items' values>" (a
+# list, PutSubmodelElementByPath), "invoke <submodel idShort>.<idShortPath> <arguments>".
 #
 #   aasMock.py --port <p> --log <file> [--values-as-text] [--authorization <value>] [--cert <pem> --keyfile <pem>]
 #              [--client-ca <pem>] [--oauth2 <id>:<secret> [--token-life <s>]]
@@ -391,6 +392,36 @@ class Handler(BaseHTTPRequestHandler):
         ok = False
     if not ok:
       return self.answer(400, {"messages": [{"messageType": "Error", "text": "the value does not fit the element"}]})
+    self.answer(204)
+
+  def do_PUT(self):
+    # a whole element replaced (PutSubmodelElementByPath) - a SubmodelElementList, its items Properties that fit
+    raw = self.body()
+    if not self.authorized():
+      return
+    p = self.parts()
+    if len(p) != 4 or p[0] != "submodels" or p[2] != "submodel-elements":
+      return self.notFound()
+    with lock:
+      sm = byId(SUBMODELS, b64decode(p[1]))
+      e = element(sm, p[3]) if sm is not None else None
+      if e is None:
+        return self.notFound()
+      try:
+        new = json.loads(raw)
+      except ValueError:
+        new = None
+      items = new.get("value") if isinstance(new, dict) and new.get("modelType") == "SubmodelElementList" else None
+      self.logLine("PUT %s.%s %s" % (sm["idShort"], urllib.parse.unquote(p[3]),
+                                     json.dumps([x.get("value") for x in items], separators=(",", ":")) if isinstance(items, list) else raw.decode()))
+      ok = (e["modelType"] == "SubmodelElementList" and isinstance(items, list) and new.get("idShort") == e.get("idShort") and
+            all(isinstance(x, dict) and x.get("modelType") == "Property" and isinstance(x.get("value"), str) and
+                fromText({"modelType": "Property", "valueType": x.get("valueType", "xs:string")}, x["value"]) is not None for x in items))
+      if ok:
+        e.clear()
+        e.update(new)
+    if not ok:
+      return self.answer(400, {"messages": [{"messageType": "Error", "text": "the element does not fit"}]})
     self.answer(204)
 
   def token(self, raw):

@@ -10,7 +10,8 @@
 #
 #   pressure, mode                     Properties (xs:double, xs:string)
 #   manufacturerName                   a MultiLanguageProperty - [ { "<language>": text } ]
-#   markings                           a SubmodelElementList of xs:string
+#   markings                           a SubmodelElementList of xs:string - the element written whole (PUT
+#                                      .../submodel-elements/Markings), its items the new values
 #   pressureRange                      a Range - { "min", "max" }
 #   addressInformationStreet           a Property in a collection - its idShortPath AddressInformation.Street
 #
@@ -71,10 +72,10 @@ echo
 echo
 
 
-echo "04. PATCH markings - a ListProperty: the list's values"
-echo "======================================================"
+echo "04. PATCH markings - a ListProperty: the list element written whole, its items the values"
+echo "========================================================================================="
 attrPatch $NP markings '{"type": "ListProperty", "valueList": ["CE", "UKCA", "FCC"]}'
-serverAwait 'PATCH Nameplate.Markings ["CE","UKCA","FCC"]'
+serverAwait 'PUT Nameplate.Markings ["CE","UKCA","FCC"]'
 echo
 echo
 
@@ -178,10 +179,10 @@ PATCH OperationalData.Mode "manual"
 PATCH Nameplate.ManufacturerName [{"en":"ACME"},{"de":"ACME DE"}]
 
 
-04. PATCH markings - a ListProperty: the list's values
-======================================================
+04. PATCH markings - a ListProperty: the list element written whole, its items the values
+=========================================================================================
 204
-PATCH Nameplate.Markings ["CE","UKCA","FCC"]
+PUT Nameplate.Markings ["CE","UKCA","FCC"]
 
 
 05. PATCH pressureRange - a Range: { min, max }
@@ -267,7 +268,7 @@ The server was asked:
 PATCH OperationalData.Pressure 300
 PATCH OperationalData.Mode "manual"
 PATCH Nameplate.ManufacturerName [{"en":"ACME"},{"de":"ACME DE"}]
-PATCH Nameplate.Markings ["CE","UKCA","FCC"]
+PUT Nameplate.Markings ["CE","UKCA","FCC"]
 PATCH OperationalData.PressureRange {"min":10,"max":350}
 PATCH Nameplate.AddressInformation.Street "Nebenstr. 2"
 PATCH OperationalData.Mode "broken"

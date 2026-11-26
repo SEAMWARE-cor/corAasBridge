@@ -16,7 +16,8 @@
 #   mode                  an xs:string Property   "manual", as ever - no second body
 #   manufacturerName      a MultiLanguageProperty its ValueOnly form, as ever - no second body
 #   languages             a list declared of any element (typeValueListElement SubmodelElement) whose items are
-#                         xs:string Properties: a ListProperty, written as one
+#                         xs:string Properties: a ListProperty, written as one - the element whole (PUT), its
+#                         items' values strings, as the AAS JSON has them
 #
 # A value the server refuses as a string too is read back, as any refused write.
 #
@@ -91,7 +92,7 @@ serverAwait 'PATCH OperationalData.Mode "manual"'
 attrPatch $NP manufacturerName '{"type": "LanguageProperty", "languageMap": {"en": "ACME"}}'
 serverAwait 'PATCH Nameplate.ManufacturerName [{"en":"ACME"}]'
 attrPatch $NP languages '{"type": "ListProperty", "valueList": ["en", "de", "fr"]}'
-serverAwait 'PATCH Nameplate.Languages ["en","de","fr"]'
+serverAwait 'PUT Nameplate.Languages ["en","de","fr"]'
 echo
 echo
 
@@ -106,8 +107,8 @@ echo
 echo
 
 
-echo "07. The server's PATCHes since 04 - one each"
-echo "============================================"
+echo "07. The server's writes since 04 - one each"
+echo "==========================================="
 serverLog
 echo
 echo
@@ -169,7 +170,7 @@ PATCH OperationalData.Mode "manual"
 204
 PATCH Nameplate.ManufacturerName [{"en":"ACME"}]
 204
-PATCH Nameplate.Languages ["en","de","fr"]
+PUT Nameplate.Languages ["en","de","fr"]
 
 
 06. What the server has now - read back by the bridge
@@ -196,13 +197,13 @@ PATCH Nameplate.Languages ["en","de","fr"]
 }
 
 
-07. The server's PATCHes since 04 - one each
-============================================
+07. The server's writes since 04 - one each
+===========================================
 PATCH Nameplate.YearOfConstruction "2026"
 PATCH OperationalData.Running "false"
 PATCH OperationalData.PressureRange {"min":"10","max":"350"}
 PATCH OperationalData.Mode "manual"
 PATCH Nameplate.ManufacturerName [{"en":"ACME"}]
-PATCH Nameplate.Languages ["en","de","fr"]
+PUT Nameplate.Languages ["en","de","fr"]
 
 

@@ -63,7 +63,7 @@ form:
 | Property | the value: `300`, `"manual"`, `true` |
 | MultiLanguageProperty | `[ { "en": "ACME" }, { "de": "ACME DE" } ]` - from the LanguageProperty's languageMap |
 | Range | `{ "min": 10, "max": 350 }` |
-| SubmodelElementList of Properties | `[ "CE", "UKCA" ]` - from the ListProperty's valueList |
+| SubmodelElementList of Properties | not by `$value`: the element read (`GET .../submodel-elements/{idShortPath}`), its items replaced - each a copy of the first (its `valueType`, `semanticId`), its value one of the ListProperty's valueList, a string as the AAS JSON has it - and written whole, `PUT .../submodel-elements/{idShortPath}` |
 
 - **Numbers and booleans as strings.** IDTA-01001's ValueOnly has an `xs:int`, `xs:double`, ... as a JSON
   number and an `xs:boolean` as a JSON boolean, and the bridge writes them so. Some servers take them only as
@@ -72,6 +72,9 @@ form:
   boolean in it (any 4xx or 5xx but 401, 403 and 404) is sent once more with them as strings; taken, every
   later write to the server goes out so at once, and the log says it, once. A LanguageProperty has no number:
   it is written once.
+- **A list is written whole**, not by its `$value`: Eclipse BaSyx does not implement `$value` on a
+  SubmodelElementList (501), and FA³ST Service cannot write a list of any element so (500) and, when the number
+  of items changes, answers 204 and keeps the items it had. A PUT of the element is taken by both.
 - A File, a Blob and the shell's assetInformation are not written back: 422.
 - The write is queued and the client answered at once; a writer thread sends the writes one at a time. Up
   to 256 wait; a full queue is refused (503), as is a write before the server has ever answered.
@@ -163,15 +166,13 @@ endpoint too.
 `aas_basyx` runs against a real AAS server, Eclipse BaSyx's AAS environment (2.0.0-milestone-16): corTest's
 `-basyx` - an image the test starts in docker (the default when docker answers), the URL of one running (CI's
 service, `AAS_BASYX_URL`), or `off` (the test is skipped). It POSTs its own shell and submodel; an Operation BaSyx
-delegates goes to `test/funcTests/basyxDelegate.py`. BaSyx does not implement `$value` on a SubmodelElementList
-(501): a list written there is read back.
+delegates goes to `test/funcTests/basyxDelegate.py`. A list is written by a PUT of the element (Write-back, above).
 
 `aas_faaast` runs against a second real server, FA³ST Service 1.3 (Fraunhofer IOSB): corTest's `-faaast`, as `-basyx`
 (CI's service, `AAS_FAAAST_URL`), with FA³ST's defaults - https with a self-signed certificate (`insecure`). FA³ST takes
 ValueOnly numbers and booleans as JSON, no fallback needed. It runs an Operation only through an asset connection of
-its own configuration - without one it answers 500, the client 502 with its reason. A list of any element
-(`SubmodelElement`) it cannot write by `$value` (500): read back. A list's `$value` with a different number of items
-it answers 204 and keeps the items it had - the next poll reads them back.
+its own configuration - without one it answers 500, the client 502 with its reason. A list is written by a PUT of the
+element (Write-back, above).
 
 The other tests run on `test/funcTests/aasMock.py`, which plays the server: a shell with a Digital Nameplate and an operational-data
 submodel, PATCHes and invocations logged, a value that does not fit refused, three Operations, https with a

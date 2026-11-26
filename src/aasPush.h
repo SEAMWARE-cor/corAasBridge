@@ -13,16 +13,36 @@
 //
 // Two servers' events: Eclipse BaSyx's (its mqtt feature, sm-repository/<repo>/submodels/...) and FA³ST
 // Service's (MessageBusMqtt, events/<Event>Message, its default topicPrefix). libmosquitto, its own thread;
-// the connection retried (1 s to 30 s).
+// the connection retried (1 s to 30 s). mqtts: TLS - the broker's certificate verified against caFile (else the
+// system's CAs) unless insecure, clientCert/clientKey the plugin's own; a username and password if given.
 //
+#include <stdbool.h>                                  // bool
 
 
 
 // -----------------------------------------------------------------------------
 //
-// aasPushStart - url: mqtt://<host>[:<port>] (1883). NULL: started (connected or not - it is retried); else why not
+// AasPushConfig - the "push" member: url mqtt[s]://<host>[:<port>], the rest optional (NULL, false)
 //
-extern const char* aasPushStart(const char* url);
+typedef struct AasPushConfig
+{
+  const char*  url;
+  const char*  username;
+  const char*  password;
+  const char*  caFile;
+  bool         insecure;
+  const char*  clientCert;
+  const char*  clientKey;                             // NULL: in clientCert's file
+} AasPushConfig;
+
+
+
+// -----------------------------------------------------------------------------
+//
+// aasPushStart - url: mqtt://<host>[:<port>] (1883), mqtts://<host>[:<port>] (8883). NULL: started (connected or
+// not - it is retried); else why not (a malformed url, a file TLS cannot use)
+//
+extern const char* aasPushStart(const AasPushConfig* cP);
 
 
 

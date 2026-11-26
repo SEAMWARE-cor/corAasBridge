@@ -13,7 +13,7 @@
 #   BaSyx's event                  sm-repository/sm-repo/submodels/<id>/submodelElements/Pressure/value/updated: in
 #   FA³ST's event                  events/ValueChangeEventMessage, the Submodel key in the payload: in
 #   the MQTT broker gone, back     polled only meanwhile (the log says it, once); reconnected: events again
-#   push.url not mqtt://           the broker does not start
+#   push.url not mqtt[s]://        the broker does not start
 #
 # REQUIRE_FEATURE: ASSET_CHANNELS
 #
@@ -87,7 +87,7 @@ echo "04. The MQTT broker gone - polled only, said once; back - reconnected, eve
 echo "==================================================================================="
 mqttStop
 sleep 2
-grep -o 'aas: push: the connection to the MQTT broker .* lost - polled only, until it is back' $D/broker.log | sort | uniq -c | sed 's/^ *//'
+grep -o 'aas: push: the connection to the MQTT broker .* lost (.*) - polled only, until it is back' $D/broker.log | sort | uniq -c | sed 's/^ *//'
 mqttStart
 mqttSubscribed 'events/+' 35 && echo "subscribed again"
 mockSet $OP Pressure '"250"'
@@ -97,12 +97,12 @@ echo
 echo
 
 
-echo "05. push.url not mqtt:// - the broker does not start"
-echo "===================================================="
+echo "05. push.url not mqtt[s]:// - the broker does not start"
+echo "======================================================="
 brokerStop
 config ', "push": { "url": "http://localhost:'$AAS_MQTT_PORT'" }'
 brokerStart 2> /dev/null || echo "brokerStart failed"
-grep -o 'aas: push.url - mqtt://<host>\[:<port>\], .*' $D/broker.log
+grep -o 'aas: push.url - mqtt\[s\]://<host>\[:<port>\], .*' $D/broker.log
 echo
 echo
 
@@ -147,7 +147,7 @@ published events/ValueChangeEventMessage
 
 04. The MQTT broker gone - polled only, said once; back - reconnected, events again
 ===================================================================================
-1 aas: push: the connection to the MQTT broker localhost:18883 lost - polled only, until it is back
+1 aas: push: the connection to the MQTT broker localhost:18883 lost (The connection was lost.) - polled only, until it is back
 subscribed again
 {
   "id": "https://acme.example/ids/sm/press-17/operational",
@@ -156,9 +156,9 @@ subscribed again
 }
 
 
-05. push.url not mqtt:// - the broker does not start
-====================================================
+05. push.url not mqtt[s]:// - the broker does not start
+=======================================================
 brokerStart failed
-aas: push.url - mqtt://<host>[:<port>], the MQTT broker the AAS server publishes its events to
+aas: push.url - mqtt[s]://<host>[:<port>], the MQTT broker the AAS server publishes its events to
 
 

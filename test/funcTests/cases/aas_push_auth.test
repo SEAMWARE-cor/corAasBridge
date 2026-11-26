@@ -1,0 +1,183 @@
+#
+# FILE            aas_push_auth.test
+#
+# Copyright 2026 Seamware
+# SPDX-License-Identifier: Apache-2.0
+#
+# Push to an MQTT broker that wants credentials and TLS: push.usernameEnv/passwordEnv (from the environment,
+# never from the file) and mqtts:// - the broker's certificate verified against push.caFile (else the system's
+# CAs) unless push.insecure, push.clientCert/clientKey the plugin's own. The broker is a mosquitto of the test's
+# (mqttStart --tls --auth): TLS, one user; the mock publishes its changes on a plain listener of the same broker.
+# The AssetChannel is polled every 60 s: a value in within seconds came by an event.
+#
+#   mqtts, caFile, the user and password            subscribed: events in
+#   a wrong password                                 refused (not authorised): polled only, the log says why
+#   mqtts, no caFile                                 the system's CAs do not know the test's: not connected
+#   insecure                                         the certificate not verified: events in
+#   a broker that wants a client certificate         without one: not connected; clientCert, clientKey: events in
+#   caFile with mqtt://, passwordEnv not set         the broker does not start
+#
+# REQUIRE_FEATURE: ASSET_CHANNELS
+#
+--NAME--
+aas bridge - push over mqtts with a user and password, the broker's certificate verified, a client certificate
+
+--TAGS--
+bridge aas
+
+--INIT--
+rm -rf "${AAS_TEST_DIR:?}"
+mkdir -p "$AAS_TEST_DIR"
+mqttStart --tls --auth bridge:m0squ1tto
+AAS_MQTT_PUBLISH_PORT=$((AAS_MQTT_PORT + 1)) mockStart --push basyx
+
+--RUN--
+SH=https://acme.example/ids/aas/press-17
+OP=https://acme.example/ids/sm/press-17/operational
+D=$AAS_TEST_DIR
+config() {  # config <push members> [scheme] - the bridge configuration, polled every 60 s
+  cat > $D/bridges.json <<J
+{ "aas": { "server": { "url": "http://localhost:$AAS_MOCK_PORT" },
+           "push": { "url": "${2:-mqtts}://localhost:$AAS_MQTT_PORT", "usernameEnv": "AAS_TEST_MQTT_USER" $1 },
+           "ngsild": { "defaultEntity": false, "assetChannels": {
+             "$SH": { "entities": "natural", "channelInfo": [ { "key": "pollInterval", "value": "PT60S" } ] } } } } }
+J
+}
+logAwait() {  # logAwait <text> - wait until the broker's log has <text> (10 s)
+  for i in $(seq 1 100); do grep -qF -- "$1" $D/broker.log && return 0; sleep 0.1; done
+  echo "logAwait: no '$1' in the broker's log" >&2
+}
+pressure() {  # pressure <value> - set at the source; the entity's after at most 3 s
+  mockSet $OP Pressure "\"$1\""
+  entityAwait $OP pressure "$1" 3 2> /dev/null
+  entityGet $OP pressure keyValues | grep pressure
+}
+export AAS_TEST_MQTT_USER=bridge
+
+echo "01. mqtts, caFile, the user and password - subscribed: an event in"
+echo "=================================================================="
+config ', "passwordEnv": "AAS_TEST_MQTT_PASSWORD", "caFile": "'$D/mqtt-ca.pem'"'
+AAS_TEST_MQTT_PASSWORD=m0squ1tto brokerStart
+entityAwait $OP pressure 212.5
+mqttSubscribed 'events/+' && echo subscribed
+pressure 220
+echo
+echo
+
+
+echo "02. A wrong password - refused: polled only, the log says why"
+echo "============================================================="
+AAS_TEST_MQTT_PASSWORD=wrong brokerStart
+logAwait 'refused the connection'
+grep -o "aas: push: the MQTT broker localhost:$AAS_MQTT_PORT refused the connection: .*" $D/broker.log | sort -u
+assetChannels
+echo
+echo
+
+
+echo "03. mqtts, no caFile - the system's CAs do not know the test's: not connected"
+echo "============================================================================="
+config ', "passwordEnv": "AAS_TEST_MQTT_PASSWORD"'
+: > $D/mqtt.log
+AAS_TEST_MQTT_PASSWORD=m0squ1tto brokerStart
+entityAwait $OP pressure 220
+sleep 2
+grep -o 'aas: push: .*' $D/broker.log | sort -u
+echo "subscriptions at the broker: $(grep -c 'events/+ (QoS' $D/mqtt.log)"
+pressure 230
+echo
+echo
+
+
+echo "04. insecure - the certificate not verified: an event in"
+echo "========================================================"
+config ', "passwordEnv": "AAS_TEST_MQTT_PASSWORD", "insecure": true'
+: > $D/mqtt.log
+AAS_TEST_MQTT_PASSWORD=m0squ1tto brokerStart
+entityAwait $OP pressure 230
+mqttSubscribed 'events/+' && echo subscribed
+pressure 240
+echo
+echo
+
+
+echo "05. A broker that wants a client certificate - without one not connected; clientCert, clientKey: an event in"
+echo "============================================================================================================"
+brokerStop
+mqttStart --tls --auth bridge:m0squ1tto --client-ca
+config ', "passwordEnv": "AAS_TEST_MQTT_PASSWORD", "caFile": "'$D/mqtt-ca.pem'"'
+AAS_TEST_MQTT_PASSWORD=m0squ1tto brokerStart
+entityAwait $OP pressure 240
+sleep 2
+grep -o 'aas: push: .*' $D/broker.log | sort -u
+echo "subscriptions at the broker without: $(grep -c 'events/+ (QoS' $D/mqtt.log)"
+config ', "passwordEnv": "AAS_TEST_MQTT_PASSWORD", "caFile": "'$D/mqtt-ca.pem'", "clientCert": "'$D/mqtt-client.pem'", "clientKey": "'$D/mqtt-client.key'"'
+AAS_TEST_MQTT_PASSWORD=m0squ1tto brokerStart
+entityAwait $OP pressure 240
+mqttSubscribed 'events/+' && echo subscribed
+pressure 250
+echo
+echo
+
+
+echo "06. caFile with mqtt://, passwordEnv not set - the broker does not start"
+echo "========================================================================"
+brokerStop
+config ', "caFile": "'$D/mqtt-ca.pem'"' mqtt
+brokerStart 2> /dev/null || echo "brokerStart failed"
+grep -o 'aas: push.caFile, insecure, clientCert - the url is not mqtts://' $D/broker.log
+config ', "passwordEnv": "AAS_TEST_MQTT_PASSWORD"'
+brokerStart 2> /dev/null || echo "brokerStart failed"
+grep -o 'aas: push.passwordEnv names an environment variable that is not set' $D/broker.log
+echo
+echo
+
+
+--TEARDOWN--
+brokerStop
+mockStop
+mqttStop
+rm -f "${AAS_TEST_DIR:?}/bridges.json"
+
+--EXPECT--
+01. mqtts, caFile, the user and password - subscribed: an event in
+==================================================================
+subscribed
+  "pressure": 220,
+
+
+02. A wrong password - refused: polled only, the log says why
+=============================================================
+aas: push: the MQTT broker localhost:18883 refused the connection: Connection Refused: not authorised.
+https://acme.example/ids/aas/press-17 available - in valuesIn=0 valuesOut=-
+
+
+03. mqtts, no caFile - the system's CAs do not know the test's: not connected
+=============================================================================
+aas: push: no connection to the MQTT broker localhost:18883 (OpenSSL Error[0]: error:0A000086:SSL routines::certificate verify failed) - polled only, tried again
+subscriptions at the broker: 0
+  "pressure": 220,
+
+
+04. insecure - the certificate not verified: an event in
+========================================================
+subscribed
+  "pressure": 240,
+
+
+05. A broker that wants a client certificate - without one not connected; clientCert, clientKey: an event in
+============================================================================================================
+aas: push: no connection to the MQTT broker localhost:18883 (OpenSSL Error[0]: error:0A00045C:SSL routines::tlsv13 alert certificate required) - polled only, tried again
+subscriptions at the broker without: 0
+subscribed
+  "pressure": 250,
+
+
+06. caFile with mqtt://, passwordEnv not set - the broker does not start
+========================================================================
+brokerStart failed
+aas: push.caFile, insecure, clientCert - the url is not mqtts://
+brokerStart failed
+aas: push.passwordEnv names an environment variable that is not set
+
+

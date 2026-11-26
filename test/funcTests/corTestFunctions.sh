@@ -116,7 +116,7 @@ mockStart() {
         shift
         ;;
       --push)                                         # basyx|faaast: changes published to mqttStart's broker
-        opts+=(--push "$2" --mqtt-port "$AAS_MQTT_PORT")
+        opts+=(--push "$2" --mqtt-port "${AAS_MQTT_PUBLISH_PORT:-$AAS_MQTT_PORT}")
         shift
         ;;
       --values-as-text|--log-requests)
@@ -144,13 +144,60 @@ mockStart() {
 
 # -----------------------------------------------------------------------------
 #
-# mqttStart - an MQTT broker on localhost:$AAS_MQTT_PORT (mosquitto, verbose: its log has each SUBSCRIBE), for
-# push; mqttStop. mqttSubscribed <topic> [secs] - wait until a client has subscribed to <topic> at it
+# mqttStart [--tls] [--auth <user>:<password>] [--client-ca] - an MQTT broker on localhost:$AAS_MQTT_PORT
+# (mosquitto, verbose: its log has each SUBSCRIBE), for push. --tls: TLS only, a certificate for localhost by a
+# CA of the test's own ($AAS_TEST_DIR/mqtt-ca.pem); --auth: that user only (no anonymous client); --client-ca:
+# only a client with a certificate of the same CA ($AAS_TEST_DIR/mqtt-client.pem, mqtt-client.key). The client
+# publishing for the mock (no TLS, no user) gets a plain listener of its own, $AAS_MQTT_PORT + 1, when the main
+# one is not plain - aasMock's --mqtt-port. mqttStop. mqttSubscribed <topic> [secs] - wait until a client has
+# subscribed to <topic> at it
 #
 AAS_MQTT_PORT="${AAS_MQTT_PORT:-18883}"
 mqttStart() {
   mqttStop
-  mosquitto -v -p "$AAS_MQTT_PORT" > "$AAS_TEST_DIR/mqtt.log" 2>&1 &
+
+  local d="$AAS_TEST_DIR" tls=no auth="" clientCa=no
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tls)       tls=yes ;;
+      --auth)      auth="$2"; shift ;;
+      --client-ca) clientCa=yes ;;
+    esac
+    shift
+  done
+
+  local conf="$d/mqtt.conf"
+  if [ "$tls" = no ] && [ -z "$auth" ]; then
+    printf 'listener %s 127.0.0.1\nallow_anonymous true\n' "$AAS_MQTT_PORT" > "$conf"
+  else
+    printf 'per_listener_settings true\nlistener %s 127.0.0.1\n' "$AAS_MQTT_PORT" > "$conf"
+    if [ -n "$auth" ]; then
+      : > "$d/mqtt.passwd"
+      mosquitto_passwd -b "$d/mqtt.passwd" "${auth%%:*}" "${auth#*:}" > /dev/null 2>&1
+      printf 'allow_anonymous false\npassword_file %s\n' "$d/mqtt.passwd" >> "$conf"
+    else
+      printf 'allow_anonymous true\n' >> "$conf"
+    fi
+    if [ "$tls" = yes ]; then
+      openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=aas test mqtt root" \
+              -keyout "$d/mqtt-ca.key" -out "$d/mqtt-ca.pem" > /dev/null 2>&1
+      openssl req -newkey rsa:2048 -nodes -subj "/CN=localhost" -keyout "$d/mqtt-server.key" -out "$d/mqtt-server.csr" > /dev/null 2>&1
+      printf 'subjectAltName=DNS:localhost\n' > "$d/mqtt-server.ext"
+      openssl x509 -req -in "$d/mqtt-server.csr" -CA "$d/mqtt-ca.pem" -CAkey "$d/mqtt-ca.key" -CAcreateserial -days 2 \
+              -extfile "$d/mqtt-server.ext" -out "$d/mqtt-server.pem" > /dev/null 2>&1
+      printf 'cafile %s\ncertfile %s\nkeyfile %s\n' "$d/mqtt-ca.pem" "$d/mqtt-server.pem" "$d/mqtt-server.key" >> "$conf"
+      if [ "$clientCa" = yes ]; then
+        openssl req -newkey rsa:2048 -nodes -subj "/CN=aas test mqtt client" -keyout "$d/mqtt-client.key" -out "$d/mqtt-client.csr" > /dev/null 2>&1
+        openssl x509 -req -in "$d/mqtt-client.csr" -CA "$d/mqtt-ca.pem" -CAkey "$d/mqtt-ca.key" -CAcreateserial -days 2 \
+                -out "$d/mqtt-client.pem" > /dev/null 2>&1
+        printf 'require_certificate true\n' >> "$conf"
+      fi
+      chmod 644 "$d"/mqtt-*.key
+    fi
+    printf 'listener %s 127.0.0.1\nallow_anonymous true\n' "$((AAS_MQTT_PORT + 1))" >> "$conf"
+  fi
+
+  mosquitto -v -c "$conf" > "$AAS_TEST_DIR/mqtt.log" 2>&1 &
   echo $! > "$AAS_TEST_DIR/mqtt.pid"
 
   local i

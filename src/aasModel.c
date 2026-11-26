@@ -648,7 +648,8 @@ void aasReadRelease(AasRead* rP)
 // -----------------------------------------------------------------------------
 //
 // referenceTarget - what a Reference refers to: its one key's value; with more keys (an element of a
-// submodel) "<the first>#<the others, '.'-joined>" - the leaf id the element has here
+// submodel) "<the first>#<the idShortPath>" - the leaf id the element has here: the keys after the first
+// '.'-joined, a key after a SubmodelElementList's as its index, "[<n>]" (Markings[0])
 //
 static char* referenceTarget(CorAlloc* kaP, CorNode* refP)
 {
@@ -668,7 +669,7 @@ static char* referenceTarget(CorAlloc* kaP, CorNode* refP)
   int len = strlen(first) + 1;
 
   for (CorNode* keyP = keysP->value.head->next; keyP != NULL; keyP = keyP->next)
-    len += ((str(keyP, "value") != NULL) ? strlen(str(keyP, "value")) : 0) + 1;
+    len += ((str(keyP, "value") != NULL) ? strlen(str(keyP, "value")) : 0) + 2;
 
   char* target = corAlloc(kaP, len + 1);
 
@@ -678,14 +679,29 @@ static char* referenceTarget(CorAlloc* kaP, CorNode* refP)
   strcpy(target, first);
   strcat(target, "#");
 
+  const char* prevType = NULL;
+
   for (CorNode* keyP = keysP->value.head->next; keyP != NULL; keyP = keyP->next)
   {
-    if (str(keyP, "value") == NULL)
+    const char* value  = str(keyP, "value");
+    bool        inList = ((prevType != NULL) && (strcmp(prevType, "SubmodelElementList") == 0));
+
+    prevType = str(keyP, "type");
+
+    if (value == NULL)
       continue;
+
+    if (inList == true)
+    {
+      strcat(target, "[");
+      strcat(target, value);
+      strcat(target, "]");
+      continue;
+    }
 
     if (keyP != keysP->value.head->next)
       strcat(target, ".");
-    strcat(target, str(keyP, "value"));
+    strcat(target, value);
   }
 
   return target;
@@ -1017,6 +1033,7 @@ static void listAdd(Walk* wP, CorNode* parentP, CorNode* elementP, const char* i
   CorNode* childrenP = corTreeArray(kaP, "children");
 
   corTreeChildAdd(collP, corTreeString(kaP, "node", "collection"));
+  corTreeChildAdd(collP, corTreeString(kaP, "id",   leafId(wP, path)));   // what a reference to it names
   corTreeChildAdd(collP, corTreeString(kaP, "name", (char*) idShort));
   semanticIdsAdd(kaP, collP, elementP);
   corTreeChildAdd(collP, childrenP);
@@ -1142,6 +1159,7 @@ static void elementAdd(Walk* wP, CorNode* parentP, CorNode* elementP, const char
     CorNode* collP = corTreeObject(kaP, NULL);
 
     corTreeChildAdd(collP, corTreeString(kaP, "node", "collection"));
+    corTreeChildAdd(collP, corTreeString(kaP, "id",   leafId(wP, path)));   // what a reference to it names
     corTreeChildAdd(collP, corTreeString(kaP, "name", (char*) idShort));
     semanticIdsAdd(kaP, collP, elementP);
     corTreeChildAdd(collP, corTreeArray(kaP, "children"));

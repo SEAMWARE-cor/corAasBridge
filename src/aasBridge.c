@@ -89,6 +89,7 @@ typedef struct Job
   char*         leafId;                               // a write's
   char*         path;
   char*         body;
+  char*         bodyText;                             // the body, numbers and booleans as strings (NULL: none)
   char*         echo;                                 // the value as the next read renders it
   AasTarget     target;                               // an invocation's - its own TLS context
   char*         executionId;
@@ -119,6 +120,7 @@ static bool                insecure      = false;
 static const BridgeBroker* brokerP       = NULL;
 static volatile bool       stop          = false;
 static volatile bool       answered      = false;   // the server has answered, once: a write can go out
+static bool                valuesAsText  = false;   // the server takes ValueOnly numbers and booleans as strings only (writer thread)
 static bool                threads       = false;
 static pthread_t           pollThread;
 static pthread_t           writerThread;
@@ -467,6 +469,7 @@ static void jobFree(Job* jP)
   free(jP->leafId);
   free(jP->path);
   free(jP->body);
+  free(jP->bodyText);
   free(jP->echo);
   free(jP->executionId);
   free(jP->input);
@@ -533,16 +536,39 @@ static Job* jobNext(Queue* qP)
 //
 static void leafWrite(Job* jP)
 {
-  char* answer = NULL;
-  int   status = aasRequest(&target, "PATCH", jP->path, jP->body, &answer, TIMEOUT_MS);
-  bool  ok     = (status >= 200) && (status <= 299);
+  char*       answer = NULL;
+  const char* body   = ((valuesAsText == true) && (jP->bodyText != NULL)) ? jP->bodyText : jP->body;
+  int         status = aasRequest(&target, "PATCH", jP->path, body, &answer, TIMEOUT_MS);
+  bool        ok     = (status >= 200) && (status <= 299);
+
+  //
+  // Refused with a number or a boolean in it, by a server that is not refusing who we are or where we write: once
+  // more with them as strings. Taken, every write to this server is sent so from now on
+  //
+  if ((ok == false) && (status >= 400) && (status != 401) && (status != 403) && (status != 404) && (body != jP->bodyText) && (jP->bodyText != NULL))
+  {
+    char* answerText = NULL;
+    int   statusText = aasRequest(&target, "PATCH", jP->path, jP->bodyText, &answerText, TIMEOUT_MS);
+
+    if ((statusText >= 200) && (statusText <= 299))
+    {
+      COR_W("aas: PATCH %s %s: %d, %s: %d - the server takes numbers and booleans as strings only (IDTA-01001's ValueOnly has them "
+            "as JSON numbers and booleans): sent as strings from now on", jP->path, jP->body, status, jP->bodyText, statusText);
+      valuesAsText = true;
+      ok           = true;
+      status       = statusText;
+      body         = jP->bodyText;
+    }
+
+    if (answerText != NULL) free(answerText);
+  }
 
   if (ok == true)
-    COR_V("aas: PATCH %s %s: %d", jP->path, jP->body, status);
+    COR_V("aas: PATCH %s %s: %d", jP->path, body, status);
   else if (status == 0)
-    COR_W("aas: PATCH %s %s: %s - the element is read back", jP->path, jP->body, aasHttpError());
+    COR_W("aas: PATCH %s %s: %s - the element is read back", jP->path, body, aasHttpError());
   else
-    COR_W("aas: PATCH %s %s: %d %.300s - the element is read back", jP->path, jP->body, status, (answer != NULL) ? answer : "");
+    COR_W("aas: PATCH %s %s: %d %.300s - the element is read back", jP->path, body, status, (answer != NULL) ? answer : "");
 
   free(answer);
 
@@ -941,6 +967,7 @@ int aasBridgeOpen(const AasTarget* targetP, const char* _authorization, const ch
   insecure      = _insecure;
   brokerP       = _brokerP;
   stop          = false;
+  valuesAsText  = false;
 
   if (pthread_create(&writerThread, NULL, writerMain, NULL) != 0)
     return BRIDGE_ERR;
@@ -1188,7 +1215,8 @@ int aasPublish(const char* nodeId, const char* json)
 
       jP->leafId = strdup(nodeId);
       jP->path   = (len > 0) ? malloc(len) : NULL;
-      jP->body   = aasValueOnly(&ka, kind, valueP);
+      jP->body     = aasValueOnly(&ka, kind, valueP);
+      jP->bodyText = aasValueOnlyText(&ka, kind, valueP);
       jP->echo   = aasValueAsRead(&ka, kind, valueType, valueP);
 
       if (jP->path != NULL)

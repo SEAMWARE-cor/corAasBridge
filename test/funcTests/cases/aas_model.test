@@ -9,7 +9,8 @@
 # model - three entities:
 #
 #   the shell             type Shell, its assetInformation (globalAssetId, assetKind), a Relationship per submodel
-#   the Nameplate         an MLP a LanguageProperty, a collection flattened (attributes), a list a ListProperty,
+#   the Nameplate         an MLP a LanguageProperty, a collection flattened (attributes), a list a ListProperty -
+#                         declared of Properties, or of any element with Property items (Languages) -
 #                         a File its URL (a path on the server: the API's attachment URL) and contentType, a Blob
 #                         the attachment URL; a Property with no value, and a Capability, make nothing
 #   OperationalData       values converted by valueType (xs:double, xs:boolean), a Range { min, max }, a
@@ -126,6 +127,13 @@ rm -f "${AAS_TEST_DIR:?}/bridges.json"
       "value": "Hauptstr. 1"
     },
     "id": "https://acme.example/ids/sm/press-17/nameplate",
+    "languages": {
+      "type": "ListProperty",
+      "valueList": [
+        "en",
+        "de"
+      ]
+    },
     "logo": {
       "contentType": {
         "type": "Property",

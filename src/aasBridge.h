@@ -38,10 +38,10 @@
 // -----------------------------------------------------------------------------
 //
 // aasBridgeOpen - the threads started: the poller's, the writer's and the invoker's. target is copied;
-// authorization and the TLS settings are kept for an Operation's own target (its credentials only on
-// target's server)
+// registryP (NULL: none) is where a shell is looked up (aasTargetOf's, not owned); authorization and the TLS
+// settings are kept for an Operation's own target (its credentials only on target's server)
 //
-extern int aasBridgeOpen(const AasTarget* targetP, const char* authorization, const AasTls* tlsP, const BridgeBroker* brokerP);
+extern int aasBridgeOpen(const AasTarget* targetP, AasTarget* registryP, const char* authorization, const AasTls* tlsP, const BridgeBroker* brokerP);
 
 
 

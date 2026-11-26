@@ -115,8 +115,8 @@ mockStart() {
         opts+=("$1" "$2")
         shift
         ;;
-      --values-as-text)
-        opts+=(--values-as-text)
+      --values-as-text|--log-requests)
+        opts+=("$1")
         ;;
     esac
     shift

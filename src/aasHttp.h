@@ -67,6 +67,33 @@ extern const char* aasTargetInit(AasTarget* tP, const char* url, const char* aut
 
 // -----------------------------------------------------------------------------
 //
+// aasTargetsHome - the configured server: what a target of the same host, port and scheme gets (its
+// Authorization, its OAuth2 token, the plugin's certificate) - any other server's target only tls's CAs and
+// insecure. home is copied, tls's strings too
+//
+extern void aasTargetsHome(const AasTarget* homeP, const AasTls* tlsP);
+
+
+
+// -----------------------------------------------------------------------------
+//
+// aasTargetOf - the target of a server, "http[s]://<host>[:<port>][/<base path>]" - one per base URL, made the
+// first time it is asked for, kept until aasTargetsRelease (a pointer to it stays valid). NULL: why in whyBuf
+//
+extern AasTarget* aasTargetOf(const char* baseUrl, char* whyBuf, int whyLen);
+
+
+
+// -----------------------------------------------------------------------------
+//
+// aasTargetsRelease - every target aasTargetOf made, and the home
+//
+extern void aasTargetsRelease(void);
+
+
+
+// -----------------------------------------------------------------------------
+//
 // aasOauth2Init - the token endpoint ("http[s]://<host>[:<port>]/<path>") and the client's credentials
 // (sent as HTTP Basic, RFC 6749 2.3.1); scope NULL: none asked for. Nothing is fetched yet. NULL: ok, else why
 //

@@ -654,6 +654,138 @@ static int exchange(AasTarget* tP, const char* method, const char* path, const c
 
 // -----------------------------------------------------------------------------
 //
+// targets - the servers' targets aasTargetOf made, by base URL; home, the configured server's
+//
+static struct
+{
+  pthread_mutex_t  mutex;
+  AasTarget        home;
+  AasTls           tls;                               // its strings strdup'd
+  int              count;
+  char*            urlV[64];
+  AasTarget*       targetV[64];
+} targets = { PTHREAD_MUTEX_INITIALIZER };
+
+
+
+// -----------------------------------------------------------------------------
+//
+// aasTargetsHome -
+//
+void aasTargetsHome(const AasTarget* homeP, const AasTls* tlsP)
+{
+  pthread_mutex_lock(&targets.mutex);
+
+  targets.home            = *homeP;
+  targets.home.sslCtx     = NULL;                     // not ours: the host, port, scheme and credentials only
+  targets.tls.caFile      = (tlsP->caFile     != NULL) ? strdup(tlsP->caFile)     : NULL;
+  targets.tls.insecure    = tlsP->insecure;
+  targets.tls.clientCert  = (tlsP->clientCert != NULL) ? strdup(tlsP->clientCert) : NULL;
+  targets.tls.clientKey   = (tlsP->clientKey  != NULL) ? strdup(tlsP->clientKey)  : NULL;
+
+  pthread_mutex_unlock(&targets.mutex);
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
+// aasTargetOf -
+//
+AasTarget* aasTargetOf(const char* baseUrl, char* whyBuf, int whyLen)
+{
+  AasTarget* tP = NULL;
+
+  pthread_mutex_lock(&targets.mutex);
+
+  for (int ix = 0; ix < targets.count; ix++)
+  {
+    if (strcmp(targets.urlV[ix], baseUrl) == 0)
+    {
+      tP = targets.targetV[ix];
+      break;
+    }
+  }
+
+  if (tP == NULL)
+  {
+    AasTarget   probe;
+    AasTls      other = { targets.tls.caFile, targets.tls.insecure, NULL, NULL };
+    const char* why   = aasTargetInit(&probe, baseUrl, NULL, &other);
+    bool        home  = (why == NULL) && (strcmp(probe.host, targets.home.host) == 0) && (probe.port == targets.home.port) && (probe.tls == targets.home.tls);
+
+    //
+    // The configured server's host: its credentials, and the plugin's certificate
+    //
+    if ((home == true) && (targets.tls.clientCert != NULL))
+    {
+      aasTargetRelease(&probe);
+      why = aasTargetInit(&probe, baseUrl, NULL, &targets.tls);
+    }
+
+    if ((why == NULL) && (home == true))
+    {
+      snprintf(probe.authorization, sizeof(probe.authorization), "%s", targets.home.authorization);
+      probe.oauth2 = targets.home.oauth2;
+    }
+
+    if (why != NULL)
+      snprintf(whyBuf, whyLen, "%s: %s", baseUrl, why);
+    else if (targets.count >= (int) (sizeof(targets.targetV) / sizeof(targets.targetV[0])))
+    {
+      snprintf(whyBuf, whyLen, "%s: more than %d servers", baseUrl, targets.count);
+      aasTargetRelease(&probe);
+    }
+    else if (((tP = malloc(sizeof(AasTarget))) == NULL) || ((targets.urlV[targets.count] = strdup(baseUrl)) == NULL))
+    {
+      snprintf(whyBuf, whyLen, "out of memory");
+      aasTargetRelease(&probe);
+      free(tP);
+      tP = NULL;
+    }
+    else
+    {
+      *tP = probe;
+      targets.targetV[targets.count++] = tP;
+    }
+  }
+
+  pthread_mutex_unlock(&targets.mutex);
+  return tP;
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
+// aasTargetsRelease -
+//
+void aasTargetsRelease(void)
+{
+  pthread_mutex_lock(&targets.mutex);
+
+  for (int ix = 0; ix < targets.count; ix++)
+  {
+    aasTargetRelease(targets.targetV[ix]);
+    free(targets.targetV[ix]);
+    free(targets.urlV[ix]);
+  }
+
+  if (targets.tls.caFile     != NULL) free((char*) targets.tls.caFile);
+  if (targets.tls.clientCert != NULL) free((char*) targets.tls.clientCert);
+  if (targets.tls.clientKey  != NULL) free((char*) targets.tls.clientKey);
+
+  memset(&targets.home, 0, sizeof(targets.home));
+  memset(&targets.tls,  0, sizeof(targets.tls));
+  targets.count = 0;
+
+  pthread_mutex_unlock(&targets.mutex);
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
 // oauth - the OAuth2 client credentials grant: the token endpoint, the request for a token, the token
 //
 static struct

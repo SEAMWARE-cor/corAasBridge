@@ -74,6 +74,7 @@ typedef struct AasLeaf
   AasLeafKind  kind;
   char*        valueJson;                             // the value, rendered - what a change is told by; NULL: unknown
   CorNode*     valueP;                                // during a read only: the value in the read's tree
+  AasTarget*   serverP;                               // the server of its submodel - where it is written (not owned)
 } AasLeaf;
 
 
@@ -96,9 +97,12 @@ typedef struct AasRead
 //
 // aasModelRead - the model of rootId (a shell's id, or a submodel's) read from the server, its tree allocated
 // in kaP. 200: read; 404: the server has neither a shell nor a submodel of that id; 0: no answer; else the
-// status the server answered. Anything but 200: why, in whyBuf
+// status the server answered. Anything but 200: why, in whyBuf.
+// With a registry (registryP not NULL): a shell its descriptor names (GET /shell-descriptors/{id}) read from
+// the descriptor's endpoint, each of its submodels from its submodelDescriptor's - a submodel not among them from
+// the shell's server; a root the registry does not know (404) from tP
 //
-extern int aasModelRead(AasTarget* tP, CorAlloc* kaP, const char* rootId, AasRead* rP, char* whyBuf, int whyLen);
+extern int aasModelRead(AasTarget* tP, AasTarget* registryP, CorAlloc* kaP, const char* rootId, AasRead* rP, char* whyBuf, int whyLen);
 
 
 

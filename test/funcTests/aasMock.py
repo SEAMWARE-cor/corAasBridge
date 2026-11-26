@@ -9,6 +9,11 @@
 #   PATCH /submodels/<id>/submodel-elements/<idShortPath>/$value  the ValueOnly value: 204, or 400 when it does
 #                                                               not fit the element (as a server checks it)
 #   POST  /submodels/<id>/submodel-elements/<idShortPath>/invoke  an Operation, synchronously: an OperationResult
+#   GET   /registry/shell-descriptors/<id>                      a registry's shell descriptor (IDTA-01002), the one
+#                                                               the test gave (POST /test/descriptor); else 404
+#
+# A first path segment "srv-<anything>" is skipped: the one mock is as many servers as base paths the test names
+# (http://localhost:<port>/srv-b is another server's base URL, of the same host).
 #
 # The press's Operations: SetSpeed (speed xs:double, ramp xs:boolean -> previous xs:double), Stop (fails: the
 # press is not running), Log (lines xs:string -> count xs:int). A Mode written "broken" is refused (400) - a
@@ -31,10 +36,13 @@
 #   POST /test/add      { "submodel", "element" }         an element added - the model's structure changes
 #   POST /test/remove   { "submodel", "idShort" }         one removed
 #   POST /test/revoke   {}                                every token given so far no longer valid
+#   POST /test/descriptor { "id", "descriptor" }          the registry's descriptor of shell id (null: none)
 #
 # Each PATCH, PUT and invocation is logged, one line, to the file --log names:
 # "PATCH <submodel idShort>.<idShortPath> <body>", "PUT <submodel idShort>.<idShortPath> <the items' values>" (a
-# list, PutSubmodelElementByPath), "invoke <submodel idShort>.<idShortPath> <arguments>".
+# list, PutSubmodelElementByPath), "invoke <submodel idShort>.<idShortPath> <arguments>". With --log-requests,
+# each request of the API too, before it is answered: "<verb> <the Host header's host> <path> auth|-" - whether
+# an Authorization header came with it.
 #
 #   aasMock.py --port <p> --log <file> [--values-as-text] [--authorization <value>] [--cert <pem> --keyfile <pem>]
 #              [--client-ca <pem>] [--oauth2 <id>:<secret> [--token-life <s>]]
@@ -104,6 +112,8 @@ SHELLS = [
    "assetInformation": {"assetKind": "Instance"},
    "submodels": [mref(("Submodel", LAYOUT))]}
 ]
+
+DESCRIPTORS = {}                                     # the registry's, by shell id - POST /test/descriptor
 
 SUBMODELS = [
   {"modelType": "Submodel", "id": NAMEPLATE, "idShort": "Nameplate",
@@ -329,6 +339,9 @@ class Handler(BaseHTTPRequestHandler):
 
   def authorized(self):
     given = self.headers.get("Authorization") or ""
+    if args.log_requests:
+      host = (self.headers.get("Host") or "").rsplit(":", 1)[0]
+      self.logLine("%s %s %s %s" % (self.command, host, self.path.split("?")[0], "auth" if given != "" else "-"))
     if args.oauth2 is not None:
       with lock:
         if given.startswith("Bearer ") and tokens.get(given[7:], 0) > time.time():
@@ -345,7 +358,8 @@ class Handler(BaseHTTPRequestHandler):
       f.write(line + "\n")
 
   def parts(self):
-    return self.path.split("?")[0].strip("/").split("/")
+    p = self.path.split("?")[0].strip("/").split("/")
+    return p[1:] if p[0].startswith("srv-") else p
 
   def do_GET(self):
     if not self.authorized():
@@ -357,6 +371,9 @@ class Handler(BaseHTTPRequestHandler):
       if p == ["submodels"]:
         return self.answer(200, {"result": SUBMODELS, "paging_metadata": {}})
       try:
+        if len(p) == 3 and p[0] == "registry" and p[1] == "shell-descriptors":
+          d = DESCRIPTORS.get(b64decode(p[2]))
+          return self.answer(200, d) if d is not None else self.notFound()
         if len(p) == 2 and p[0] in ("shells", "submodels"):
           i = byId(SHELLS if p[0] == "shells" else SUBMODELS, b64decode(p[1]))
           return self.answer(200, i) if i is not None else self.notFound()
@@ -456,6 +473,15 @@ class Handler(BaseHTTPRequestHandler):
           tokens[t] = 0
       return self.answer(200, {})
 
+    if p == ["test", "descriptor"]:
+      req = json.loads(raw)
+      with lock:
+        if req.get("descriptor") is None:
+          DESCRIPTORS.pop(req["id"], None)
+        else:
+          DESCRIPTORS[req["id"]] = req["descriptor"]
+      return self.answer(200, {})
+
     if p[0] == "test":
       req = json.loads(raw)
       with lock:
@@ -497,6 +523,7 @@ def main():
   p.add_argument("--client-ca")
   p.add_argument("--oauth2")
   p.add_argument("--token-life", type=int, default=60)
+  p.add_argument("--log-requests", action="store_true")
   args = p.parse_args()
 
   server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)

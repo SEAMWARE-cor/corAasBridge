@@ -144,7 +144,7 @@ static int aasInit(const char* configFile, const BridgeBroker* brokerP)
   AasTls      tls      = { NULL, false, NULL, NULL };
   AasTarget   target;
   AasTarget*  registryP = NULL;
-  AasPushConfig push    = { NULL, NULL, NULL, NULL, false, NULL, NULL };
+  AasPushConfig push    = { NULL, NULL, NULL, NULL, false, NULL, NULL, NULL };
 
   corAllocBufferInit(&ka, buf, sizeof(buf), 16 * 1024, NULL, "aas config");
   corJsonCreate(&cj, &ka);
@@ -227,6 +227,7 @@ static int aasInit(const char* configFile, const BridgeBroker* brokerP)
       push.insecure   = (pInsecureP != NULL) && (pInsecureP->type == CorBoolean) && (pInsecureP->value.b == true);
       push.clientCert = stringOf(pushNodeP, "clientCert");
       push.clientKey  = stringOf(pushNodeP, "clientKey");
+      push.clientId   = stringOf(pushNodeP, "clientId");
 
       if ((userEnv != NULL) && (push.username == NULL))
         why = "push.usernameEnv names an environment variable that is not set";

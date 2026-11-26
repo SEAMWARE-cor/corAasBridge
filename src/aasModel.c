@@ -59,6 +59,7 @@ typedef struct Walk
   const char*  submodelId;                            // the submodel being walked
   const char*  submodelB64;                           // its id, base64url
   CorNode*     relsP;                                 // the RelationshipElements read: { type, first, target }
+  CorNode*     smDescriptorsP;                        // the shell descriptor's submodelDescriptors (a registry's); NULL: none
 } Walk;
 
 
@@ -598,6 +599,7 @@ static bool leafAdd(Walk* wP, const char* id, const char* path, const char* valu
   leafP->path       = (path != NULL) ? strdup(path) : NULL;
   leafP->valueType  = (valueType != NULL) ? strdup(valueType) : NULL;
   leafP->kind       = kind;
+  leafP->serverP    = wP->tP;
   leafP->valueP     = valueP;
   leafP->valueJson  = aasRender(valueP);
 
@@ -1353,6 +1355,99 @@ static void relationshipsAdd(Walk* wP, CorNode* rootP, const char* rootId)
 
 // -----------------------------------------------------------------------------
 //
+// descriptorHref - the href of a descriptor's endpoint (IDTA-01002, the registry's descriptors): of the one in
+// descriptorsP (an array) whose id is id - or descriptorsP itself, an object, when id is NULL; the endpoint of
+// an interface starting with prefix ("AAS-3", "SUBMODEL-3"), else the first. NULL: none
+//
+static const char* descriptorHref(CorNode* descriptorsP, const char* id, const char* prefix)
+{
+  CorNode* descriptorP = NULL;
+
+  if ((descriptorsP != NULL) && (id == NULL) && (descriptorsP->type == CorObject))
+    descriptorP = descriptorsP;
+  else if ((descriptorsP != NULL) && (id != NULL) && (descriptorsP->type == CorArray))
+  {
+    for (CorNode* dP = descriptorsP->value.head; dP != NULL; dP = dP->next)
+    {
+      const char* dId = str(dP, "id");
+
+      if ((dId != NULL) && (strcmp(dId, id) == 0))
+      {
+        descriptorP = dP;
+        break;
+      }
+    }
+  }
+
+  CorNode*    endpointsP = member(descriptorP, "endpoints", CorArray);
+  const char* first      = NULL;
+
+  for (CorNode* epP = (endpointsP != NULL) ? endpointsP->value.head : NULL; epP != NULL; epP = epP->next)
+  {
+    const char* href  = str(member(epP, "protocolInformation", CorObject), "href");
+    const char* iface = str(epP, "interface");
+
+    if (href == NULL)
+      continue;
+
+    if ((iface != NULL) && (strncmp(iface, prefix, strlen(prefix)) == 0))
+      return href;
+
+    if (first == NULL)
+      first = href;
+  }
+
+  return first;
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
+// hrefTarget - the target of an endpoint's href, and the path on it, in pathBuf: an href of the element itself
+// (".../shells/<id>", what Eclipse BaSyx registers) split before kind ("/shells/", "/submodels/"); else the href
+// is the server's base URL and the path kind and b64. NULL: why in whyBuf
+//
+static AasTarget* hrefTarget(const char* href, const char* kind, const char* b64, char* pathBuf, int pathLen, char* whyBuf, int whyLen)
+{
+  const char* at = NULL;
+
+  for (const char* p = strstr(href, kind); p != NULL; p = strstr(p + 1, kind))
+    at = p;
+
+  char   base[2048];
+  size_t baseLen = (at != NULL) ? (size_t) (at - href) : strlen(href);
+
+  while ((baseLen > 0) && (href[baseLen - 1] == '/'))
+    baseLen--;
+
+  if (baseLen >= sizeof(base))
+  {
+    snprintf(whyBuf, whyLen, "the registry's href is too long: %.200s", href);
+    return NULL;
+  }
+
+  memcpy(base, href, baseLen);
+  base[baseLen] = 0;
+
+  if (at != NULL)
+    snprintf(pathBuf, pathLen, "%s", at);
+  else
+    snprintf(pathBuf, pathLen, "%s%s", kind, b64);
+
+  char        why[512];
+  AasTarget*  tP = aasTargetOf(base, why, sizeof(why));
+
+  if (tP == NULL)
+    snprintf(whyBuf, whyLen, "the registry's href: %.400s", why);
+
+  return tP;
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
 // shellNode - a shell as a node: its submodels each read, its assetInformation two leaves
 //
 static int shellNode(Walk* wP, CorNode* shellP, CorNode** nodePP, char* whyBuf, int whyLen)
@@ -1433,18 +1528,38 @@ static int shellNode(Walk* wP, CorNode* shellP, CorNode** nodePP, char* whyBuf, 
 
     snprintf(path, sizeof(path), "/submodels/%s", b64);
 
+    //
+    // Listed in the shell's descriptor: read where its submodelDescriptor's endpoint says
+    //
+    AasTarget*  shellTargetP = wP->tP;
+    const char* href         = descriptorHref(wP->smDescriptorsP, smId, "SUBMODEL-3");
+
+    if (href != NULL)
+    {
+      wP->tP = hrefTarget(href, "/submodels/", b64, path, sizeof(path), whyBuf, whyLen);
+
+      if (wP->tP == NULL)
+      {
+        wP->tP = shellTargetP;
+        free(b64);
+        return 502;
+      }
+    }
+
     CorNode* submodelP = NULL;
     int      status    = get(wP, path, &submodelP, whyBuf, whyLen);
 
     if (status == 404)
     {
       COR_W("aas: shell '%s' refers to submodel '%s' - the server has no such submodel", id, smId);
+      wP->tP = shellTargetP;
       free(b64);
       continue;                                       // a reference to nothing: no part of the model
     }
 
     if (status != 200)
     {
+      wP->tP = shellTargetP;
       free(b64);
       return status;
     }
@@ -1453,6 +1568,8 @@ static int shellNode(Walk* wP, CorNode* shellP, CorNode** nodePP, char* whyBuf, 
     free(b64);
 
     CorNode* smNodeP = submodelNode(wP, submodelP, b64Kept);
+
+    wP->tP = shellTargetP;
 
     if (smNodeP != NULL)
       corTreeChildAdd(childrenP, smNodeP);
@@ -1557,9 +1674,9 @@ static void skeletonOf(Skeleton* sP, CorNode* nodeP)
 //
 // aasModelRead -
 //
-int aasModelRead(AasTarget* tP, CorAlloc* kaP, const char* rootId, AasRead* rP, char* whyBuf, int whyLen)
+int aasModelRead(AasTarget* tP, AasTarget* registryP, CorAlloc* kaP, const char* rootId, AasRead* rP, char* whyBuf, int whyLen)
 {
-  Walk  walk = { tP, kaP, rP, 0, false, NULL, NULL, NULL };
+  Walk  walk = { tP, kaP, rP, 0, false, NULL, NULL, NULL, NULL };
   char* b64  = aasBase64Url(rootId);
   char  path[4096];
 
@@ -1577,6 +1694,49 @@ int aasModelRead(AasTarget* tP, CorAlloc* kaP, const char* rootId, AasRead* rP, 
   int      status;
 
   snprintf(path, sizeof(path), "/shells/%s", b64);
+
+  //
+  // A registry: the shell's descriptor - where the shell is, and its submodels. One the registry does not know: tP
+  //
+  if (registryP != NULL)
+  {
+    CorNode* descriptorP = NULL;
+    char     dPath[4096];
+
+    snprintf(dPath, sizeof(dPath), "/shell-descriptors/%s", b64);
+    walk.tP = registryP;
+    status  = get(&walk, dPath, &descriptorP, whyBuf, whyLen);
+    walk.tP = tP;
+
+    if (status == 200)
+    {
+      const char* href = descriptorHref(descriptorP, NULL, "AAS-3");
+
+      walk.smDescriptorsP = member(descriptorP, "submodelDescriptors", CorArray);
+
+      if (href == NULL)
+      {
+        snprintf(whyBuf, whyLen, "the registry's descriptor of '%.200s' has no endpoint", rootId);
+        status = 502;
+      }
+      else if ((walk.tP = hrefTarget(href, "/shells/", b64, path, sizeof(path), whyBuf, whyLen)) == NULL)
+        status = 502;
+    }
+    else if (status != 404)
+    {
+      char why[512];
+
+      snprintf(why, sizeof(why), "the registry: %s", whyBuf);
+      snprintf(whyBuf, whyLen, "%s", why);
+    }
+
+    if ((status != 200) && (status != 404))
+    {
+      free(b64);
+      return status;
+    }
+  }
+
   status = get(&walk, path, &bodyP, whyBuf, whyLen);
 
   if (status == 200)

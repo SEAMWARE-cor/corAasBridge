@@ -93,6 +93,7 @@ typedef struct Job
   char*         bodyText;                             // the body, numbers and booleans as strings (NULL: none)
   char*         echo;                                 // the value as the next read renders it
   bool          list;                                 // a list: path the element's, written by a PUT of the element
+  AasTarget*    serverP;                              // a write's: the server of the leaf's submodel (not owned)
   AasTarget     target;                               // an invocation's - its own TLS context
   char*         executionId;
   char*         input;
@@ -117,6 +118,7 @@ typedef struct Queue
 
 static AasTarget           target;
 static char*               authorization = NULL;     // for an Operation on target's server
+static AasTarget*          registryP     = NULL;     // where a shell is looked up; NULL: no registry
 static AasTls              tls           = { NULL, false, NULL, NULL };   // for an Operation's target - its strings strdup'd
 static const BridgeBroker* brokerP       = NULL;
 static volatile bool       stop          = false;
@@ -283,7 +285,7 @@ static void pollOne(const char* root, unsigned int generation)
 
   corAllocBufferInit(&ka, kaBuf, sizeof(kaBuf), 256 * 1024, NULL, "aas read");
 
-  int status = aasModelRead(&target, &ka, root, &read, why, sizeof(why));
+  int status = aasModelRead(&target, registryP, &ka, root, &read, why, sizeof(why));
 
   pthread_mutex_lock(&mutex);
 
@@ -369,6 +371,8 @@ static void pollOne(const char* root, unsigned int generation)
     {
       AasLeaf* oldP = &epP->leafV[ix];
       AasLeaf* newP = &read.leafV[ix];
+
+      oldP->serverP = newP->serverP;                  // the registry may have moved its submodel
 
       if ((oldP->valueJson != NULL) && (strcmp(oldP->valueJson, newP->valueJson) == 0))
         continue;
@@ -541,7 +545,7 @@ static int listWrite(Job* jP, char** answerP)
   CorAlloc ka;
   char     kaBuf[16 * 1024];
   char*    got    = NULL;
-  int      status = aasRequest(&target, "GET", jP->path, NULL, &got, TIMEOUT_MS);
+  int      status = aasRequest(jP->serverP, "GET", jP->path, NULL, &got, TIMEOUT_MS);
 
   if (status != 200)
   {
@@ -619,7 +623,7 @@ static int listWrite(Job* jP, char** answerP)
   if (body == NULL)
     return 0;
 
-  status = aasRequest(&target, "PUT", jP->path, body, answerP, TIMEOUT_MS);
+  status = aasRequest(jP->serverP, "PUT", jP->path, body, answerP, TIMEOUT_MS);
   free(body);
 
   return status;
@@ -638,7 +642,7 @@ static void leafWrite(Job* jP)
   char*       answer = NULL;
   const char* body   = ((valuesAsText == true) && (jP->bodyText != NULL)) ? jP->bodyText : jP->body;
   const char* verb   = (jP->list == true) ? "PUT" : "PATCH";
-  int         status = (jP->list == true) ? listWrite(jP, &answer) : aasRequest(&target, "PATCH", jP->path, body, &answer, TIMEOUT_MS);
+  int         status = (jP->list == true) ? listWrite(jP, &answer) : aasRequest(jP->serverP, "PATCH", jP->path, body, &answer, TIMEOUT_MS);
   bool        ok     = (status >= 200) && (status <= 299);
 
   if (jP->list == true)
@@ -651,7 +655,7 @@ static void leafWrite(Job* jP)
   if ((jP->list == false) && (ok == false) && (status >= 400) && (status != 401) && (status != 403) && (status != 404) && (body != jP->bodyText) && (jP->bodyText != NULL))
   {
     char* answerText = NULL;
-    int   statusText = aasRequest(&target, "PATCH", jP->path, jP->bodyText, &answerText, TIMEOUT_MS);
+    int   statusText = aasRequest(jP->serverP, "PATCH", jP->path, jP->bodyText, &answerText, TIMEOUT_MS);
 
     if ((statusText >= 200) && (statusText <= 299))
     {
@@ -1062,9 +1066,10 @@ static void queueDrain(Queue* qP)
 //
 // aasBridgeOpen -
 //
-int aasBridgeOpen(const AasTarget* targetP, const char* _authorization, const AasTls* tlsP, const BridgeBroker* _brokerP)
+int aasBridgeOpen(const AasTarget* targetP, AasTarget* _registryP, const char* _authorization, const AasTls* tlsP, const BridgeBroker* _brokerP)
 {
   target          = *targetP;
+  registryP       = _registryP;
   authorization   = (_authorization != NULL) ? strdup(_authorization) : NULL;
   tls.caFile      = (tlsP->caFile     != NULL) ? strdup(tlsP->caFile)     : NULL;
   tls.insecure    = tlsP->insecure;
@@ -1279,6 +1284,7 @@ int aasPublish(const char* nodeId, const char* json)
   char*       valueType  = ((both == true) && (leafP->valueType != NULL)) ? strdup(leafP->valueType) : NULL;
   char*       submodelId = ((both == true) && (leafP->submodelId != NULL)) ? strdup(leafP->submodelId) : NULL;
   char*       path       = ((both == true) && (leafP->path != NULL)) ? strdup(leafP->path) : NULL;
+  AasTarget*  serverP    = (leafP != NULL) ? leafP->serverP : NULL;
 
   pthread_mutex_unlock(&mutex);
 
@@ -1326,7 +1332,8 @@ int aasPublish(const char* nodeId, const char* json)
       jP->bodyText = aasValueOnlyText(&ka, kind, valueP);
       jP->echo   = aasValueAsRead(&ka, kind, valueType, valueP);
 
-      jP->list   = (kind == AasLeafList);
+      jP->list    = (kind == AasLeafList);
+      jP->serverP = (serverP != NULL) ? serverP : &target;
 
       if (jP->path != NULL)
         snprintf(jP->path, len, "/submodels/%s/submodel-elements/%s%s", b64, pathEnc, (jP->list == true) ? "" : "/$value");
@@ -1590,7 +1597,7 @@ int aasInventory(const char* from, int depth, int timeoutMs, char** jsonP, char*
   if (from != NULL)
   {
     AasRead read;
-    int     status = aasModelRead(&target, &ka, from, &read, errBuf, errBufLen);
+    int     status = aasModelRead(&target, registryP, &ka, from, &read, errBuf, errBufLen);
 
     if (status == 200)
     {

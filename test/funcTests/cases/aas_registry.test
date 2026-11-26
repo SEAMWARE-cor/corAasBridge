@@ -1,0 +1,160 @@
+#
+# FILE            aas_registry.test
+#
+# Copyright 2026 Seamware
+# SPDX-License-Identifier: Apache-2.0
+#
+# An AAS registry (IDTA-01002, /shell-descriptors): "registry": { "url" } - a shell is read where its descriptor's
+# endpoint says, each of its submodels where its submodelDescriptor's says; a shell the registry does not know
+# from server.url. The credentials go only to server.url's host. The mock is the registry and, by base path
+# (/srv-<x>), every server; each request it gets is logged with its host and whether an Authorization came:
+#
+#   press-17          the registry has it: the shell on /srv-a (the href the shell's own URL, as BaSyx registers
+#                     it), Nameplate on /srv-b (the href a base URL), OperationalData on /srv-c
+#   line-3            the registry does not have it (404): read from server.url, /srv-home
+#   a write           to the server of the element's submodel
+#   OperationalData   moved by the registry to another host (127.0.0.1): read there - without the credentials,
+#                     refused (401): dormant
+#   registry, no url  the broker does not start
+#
+# REQUIRE_FEATURE: ASSET_CHANNELS
+# REQUIRE_FEATURE: CHANNEL_WRITE_BACK
+#
+--NAME--
+aas bridge - an AAS registry: a shell and its submodels read where their descriptors say; credentials only to server.url's host
+
+--TAGS--
+bridge aas
+
+--INIT--
+rm -rf "${AAS_TEST_DIR:?}"
+mkdir -p "$AAS_TEST_DIR"
+mockStart --authorization "Bearer s3cret" --log-requests
+
+--RUN--
+SH=https://acme.example/ids/aas/press-17
+L3=https://acme.example/ids/aas/line-3
+NP=https://acme.example/ids/sm/press-17/nameplate
+OP=https://acme.example/ids/sm/press-17/operational
+LAYOUT=https://acme.example/ids/sm/line-3/layout
+M="http://localhost:$AAS_MOCK_PORT"
+D=$AAS_TEST_DIR
+config() {  # config [registry] - the bridge configuration
+  cat > $D/bridges.json <<J
+{ "aas": { "server": { "url": "$M/srv-home", "authorizationEnv": "AAS_TEST_AUTHORIZATION" },
+           "registry": ${1:-{ \"url\": \"$M/registry\" \}},
+           "ngsild": { "defaultEntity": false, "assetChannels": {
+             "$SH": { "entities": "natural", "channelDirection": "both", "channelInfo": [ { "key": "pollInterval", "value": "PT0.3S" } ] },
+             "$L3": { "entities": "natural", "channelInfo": [ { "key": "pollInterval", "value": "PT0.3S" } ] } } } } }
+J
+}
+descriptor() {  # descriptor <OperationalData's href> - press-17's descriptor at the registry
+  curl -s -o /dev/null -X POST "$M/test/descriptor" -d '{ "id": "'$SH'", "descriptor": { "id": "'$SH'",
+    "endpoints": [ { "interface": "AAS-3.0", "protocolInformation": { "href": "'$M/srv-a/shells/$(b64url $SH)'" } } ],
+    "submodelDescriptors": [
+      { "id": "'$NP'", "endpoints": [ { "interface": "SUBMODEL-3.0", "protocolInformation": { "href": "'$M/srv-b'" } } ] },
+      { "id": "'$OP'", "endpoints": [ { "interface": "SUBMODEL-3.0", "protocolInformation": { "href": "'$1'" } } ] } ] } }'
+}
+requests() {  # requests - the API requests the mock got since the last, ids by name, each once
+  grep -E '^(GET|PATCH|PUT|POST) [^ ]+ /' $D/server.log | sed -e "s|$(b64url $SH)|<press-17>|g" -e "s|$(b64url $L3)|<line-3>|g" \
+    -e "s|$(b64url $NP)|<nameplate>|g" -e "s|$(b64url $OP)|<operational>|g" -e "s|$(b64url $LAYOUT)|<layout>|g" | sort -u
+  : > $D/server.log
+}
+
+echo "01. press-17 from the registry's servers, line-3 (not in the registry) from server.url - all on its host: with the credentials"
+echo "==========================================================================================================================="
+descriptor "$M/srv-c/submodels/$(b64url $OP)"
+config
+AAS_TEST_AUTHORIZATION="Bearer s3cret" brokerStart
+entityAwait $OP pressure 212.5
+entityAwait $LAYOUT speed 1.2
+entityGet $OP pressure keyValues
+entityGet $NP manufacturerName keyValues
+sleep 0.4
+requests
+assetChannels
+echo
+echo
+
+
+echo "02. PATCH pressure - to OperationalData's server, /srv-c"
+echo "========================================================"
+attrPatch $OP pressure '{"value": 300}'
+serverAwait 'PATCH OperationalData.Pressure 300' > /dev/null
+requests | grep -v '^GET'
+echo
+echo
+
+
+echo "03. The registry moves OperationalData to 127.0.0.1 - another host: no credentials, refused (401), dormant"
+echo "============================================================================================================"
+descriptor "http://127.0.0.1:$AAS_MOCK_PORT/srv-d/submodels/$(b64url $OP)"
+channelAwait $SH dormant
+requests | grep -E ' 127.0.0.1 | /srv-d/'
+assetChannels | grep -F "$SH " | sed "s|$(b64url $OP)|<operational>|"
+echo
+echo
+
+
+echo "04. registry without a url - the broker does not start"
+echo "======================================================"
+brokerStop
+config '{}'
+AAS_TEST_AUTHORIZATION="Bearer s3cret" brokerStart 2> /dev/null || echo "brokerStart failed"
+grep -o 'aas: registry - .*, where the AAS registry is' "$D/broker.log"
+echo
+echo
+
+
+--TEARDOWN--
+brokerStop
+mockStop
+rm -f "${AAS_TEST_DIR:?}/bridges.json"
+
+--EXPECT--
+01. press-17 from the registry's servers, line-3 (not in the registry) from server.url - all on its host: with the credentials
+===========================================================================================================================
+{
+  "id": "https://acme.example/ids/sm/press-17/operational",
+  "pressure": 212.5,
+  "type": "OperationalData"
+}
+{
+  "id": "https://acme.example/ids/sm/press-17/nameplate",
+  "manufacturerName": {
+    "languageMap": {
+      "de": "ACME Pressen",
+      "en": "ACME Presses"
+    }
+  },
+  "type": "Nameplate"
+}
+GET localhost /registry/shell-descriptors/<line-3> auth
+GET localhost /registry/shell-descriptors/<press-17> auth
+GET localhost /srv-a/shells/<press-17> auth
+GET localhost /srv-b/submodels/<nameplate> auth
+GET localhost /srv-c/submodels/<operational> auth
+GET localhost /srv-home/shells/<line-3> auth
+GET localhost /srv-home/submodels/<layout> auth
+https://acme.example/ids/aas/line-3 available - in valuesIn=0 valuesOut=-
+https://acme.example/ids/aas/press-17 available - both valuesIn=0 valuesOut=0
+
+
+02. PATCH pressure - to OperationalData's server, /srv-c
+========================================================
+204
+PATCH localhost /srv-c/submodels/<operational>/submodel-elements/Pressure/$value auth
+
+
+03. The registry moves OperationalData to 127.0.0.1 - another host: no credentials, refused (401), dormant
+============================================================================================================
+GET 127.0.0.1 /srv-d/submodels/<operational> -
+https://acme.example/ids/aas/press-17 dormant GET /submodels/<operational>: 401 both valuesIn=0 valuesOut=1
+
+
+04. registry without a url - the broker does not start
+======================================================
+brokerStart failed
+aas: registry - { "url": "http[s]://<host>[:<port>][/<base path>]" }, where the AAS registry is
+
+

@@ -112,6 +112,7 @@ static const char* stringOf(CorNode* objectP, const char* name)
 //
 //   { "aas": { "server": { "url": "https://aas.acme.example/api/v3.0", "authorizationEnv": "AAS_AUTHORIZATION",
 //                          "caFile": "/etc/aas/ca.pem" },
+//              "registry": { "url": "https://registry.acme.example/api/v3.0" },
 //              "ngsild": { "assetChannels": { "<shell id>": { "entities": "natural", ... } } } } }
 //
 // "authorizationEnv" names the environment variable that holds the Authorization header's value ("Bearer ...")
@@ -120,6 +121,9 @@ static const char* stringOf(CorNode* objectP, const char* name)
 // names. No "caFile": the system's CA certificates; "insecure": true, the server's certificate is not
 // verified. "clientCert" (and "clientKey", unless the key is in clientCert's file): the plugin's own
 // certificate, for a server that asks for one (mutual TLS) - the token endpoint is reached with the same.
+// "registry": an AAS registry (IDTA-01002's /shell-descriptors) - where a shell and its submodels are read
+// from. The credentials and the certificate go only to server.url's host (scheme, host and port): to the
+// registry, and to a server it names, only if it is that host.
 //
 static int aasInit(const char* configFile, const BridgeBroker* brokerP)
 {
@@ -133,6 +137,7 @@ static int aasInit(const char* configFile, const BridgeBroker* brokerP)
   bool        oauth2   = false;
   AasTls      tls      = { NULL, false, NULL, NULL };
   AasTarget   target;
+  AasTarget*  registryP = NULL;
 
   corAllocBufferInit(&ka, buf, sizeof(buf), 16 * 1024, NULL, "aas config");
   corJsonCreate(&cj, &ka);
@@ -197,13 +202,28 @@ static int aasInit(const char* configFile, const BridgeBroker* brokerP)
       why = aasTargetInit(&target, url, auth, &tls);
       target.oauth2 = oauth2;
     }
+
+    CorNode* registryNodeP = corTreeLookup(aasP, "registry");
+
+    if ((why == NULL) && (registryNodeP != NULL))
+    {
+      const char* registryUrl = (registryNodeP->type == CorObject) ? stringOf(registryNodeP, "url") : NULL;
+      static char registryWhy[600];
+
+      aasTargetsHome(&target, &tls);
+
+      if (registryUrl == NULL)
+        why = "registry - { \"url\": \"http[s]://<host>[:<port>][/<base path>]\" }, where the AAS registry is";
+      else if ((registryP = aasTargetOf(registryUrl, registryWhy, sizeof(registryWhy))) == NULL)
+        why = registryWhy;
+    }
   }
 
   if (why == NULL)
   {
     hostP = brokerP;
 
-    if (aasBridgeOpen(&target, auth, &tls, brokerP) != BRIDGE_OK)
+    if (aasBridgeOpen(&target, registryP, auth, &tls, brokerP) != BRIDGE_OK)
     {
       aasTargetRelease(&target);
       why = "the plugin's threads could not be started";
@@ -212,6 +232,9 @@ static int aasInit(const char* configFile, const BridgeBroker* brokerP)
 
   if ((why != NULL) && (oauth2 == true))
     aasOauth2Release();
+
+  if (why != NULL)
+    aasTargetsRelease();
 
   corAllocBufferReset(&ka, false);                    // nothing parsed here is kept: the bridge has copies
   free(text);
@@ -234,6 +257,7 @@ static int aasInit(const char* configFile, const BridgeBroker* brokerP)
 static void aasClose(void)
 {
   aasBridgeClose();
+  aasTargetsRelease();
   aasOauth2Release();
   hostP = NULL;
 }

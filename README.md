@@ -159,6 +159,26 @@ endpoint too.
                         "clientId": "coraine", "clientSecretEnv": "AAS_CLIENT_SECRET", "scope": "aas.read" } }
 ```
 
+**A registry.** With `"registry": { "url": "http[s]://<host>[:<port>][/<base path>]" }` (a member of `aas`, beside
+`server`), an AssetChannel's shell is looked up first at an AAS registry (IDTA-01002, `GET /shell-descriptors/{id}`):
+
+- the shell is read from its descriptor's endpoint (the `AAS-3.0` interface's, else the first). The `href` may be the
+  shell's own URL (`.../shells/{id}`, as Eclipse BaSyx registers it) or the server's base URL;
+- each of its submodels is read from its entry's endpoint in the descriptor's `submodelDescriptors` (the
+  `SUBMODEL-3.0` interface's); a submodel not among them, from the shell's server;
+- a shell the registry does not know (404), and a submodel as an AssetChannel's target, are read from `server.url`;
+- a write goes to the server of the element's submodel. The registry is asked on every read, so a submodel it
+  moves is read, and written, at its new place from the next poll on.
+
+The credentials (`authorizationEnv`, the OAuth2 token) and `clientCert` go only to `server.url`'s host - the same
+scheme, host and port: to the registry and to the servers it names only when they are that host. Every other server
+gets the request without them, verified against `caFile` (or `insecure`) all the same.
+
+```json
+"aas": { "server": { "url": "https://aas.acme.example/api/v3.0", "authorizationEnv": "AAS_AUTHORIZATION" },
+         "registry": { "url": "https://aas.acme.example/registry/api/v3.0" }, "ngsild": { ... } }
+```
+
 ## Build and test
 
     make && make test          # libssl-dev; the tests run python3 and the openssl tool
@@ -178,7 +198,9 @@ The other tests run on `test/funcTests/aasMock.py`, which plays the server: a sh
 submodel, PATCHes and invocations logged, a value that does not fit refused, three Operations, https with a
 certificate made by the test, and an Authorization header; `--values-as-text` makes it take numbers and
 booleans as strings only, as BaSyx does; `--oauth2` makes it a token endpoint too, `--client-ca` takes only a client
-with a certificate (`aas_oauth2`, `aas_mtls`).
+with a certificate (`aas_oauth2`, `aas_mtls`). It is a registry too (`/registry/shell-descriptors`, the descriptors the
+test gives), and many servers by base path (`/srv-<x>/...`); `--log-requests` logs each request's host and whether
+credentials came with it (`aas_registry`).
 
 The broker must have AssetChannels; write-back (`COR_FEATURE_CHANNEL_WRITE_BACK`) for `"both"`, and Service
 Execution for the Operations.

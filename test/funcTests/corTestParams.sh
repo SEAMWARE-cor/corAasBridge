@@ -21,3 +21,16 @@ else
   basyxDefault="off"
 fi
 corCliParamAdd "-basyx" "AAS_BASYX" "$basyxDefault" "Eclipse BaSyx for aas_basyx: a URL, an image to start in docker, or off" "BASYX"
+
+#
+# -faaast - FA³ST Service (Fraunhofer IOSB) aas_faaast runs against (# SKIP_FAAAST: off), as -basyx: a URL (CI's
+# service, $AAS_FAAAST_URL - https, its API under /api/v3.0), an image started in docker, or off
+#
+if [ -n "$AAS_FAAAST_URL" ]; then
+  faaastDefault="$AAS_FAAAST_URL"
+elif docker info > /dev/null 2>&1; then
+  faaastDefault="fraunhoferiosb/faaast-service:1.3.0"
+else
+  faaastDefault="off"
+fi
+corCliParamAdd "-faaast" "AAS_FAAAST" "$faaastDefault" "FA³ST Service for aas_faaast: a URL, an image to start in docker, or off" "FAAAST"

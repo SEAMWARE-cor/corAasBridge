@@ -166,6 +166,13 @@ service, `AAS_BASYX_URL`), or `off` (the test is skipped). It POSTs its own shel
 delegates goes to `test/funcTests/basyxDelegate.py`. BaSyx does not implement `$value` on a SubmodelElementList
 (501): a list written there is read back.
 
+`aas_faaast` runs against a second real server, FA³ST Service 1.3 (Fraunhofer IOSB): corTest's `-faaast`, as `-basyx`
+(CI's service, `AAS_FAAAST_URL`), with FA³ST's defaults - https with a self-signed certificate (`insecure`). FA³ST takes
+ValueOnly numbers and booleans as JSON, no fallback needed. It runs an Operation only through an asset connection of
+its own configuration - without one it answers 500, the client 502 with its reason. A list of any element
+(`SubmodelElement`) it cannot write by `$value` (500): read back. A list's `$value` with a different number of items
+it answers 204 and keeps the items it had - the next poll reads them back.
+
 The other tests run on `test/funcTests/aasMock.py`, which plays the server: a shell with a Digital Nameplate and an operational-data
 submodel, PATCHes and invocations logged, a value that does not fit refused, three Operations, https with a
 certificate made by the test, and an Authorization header; `--values-as-text` makes it take numbers and

@@ -115,8 +115,7 @@ typedef struct Queue
 
 static AasTarget           target;
 static char*               authorization = NULL;     // for an Operation on target's server
-static char*               caFile        = NULL;
-static bool                insecure      = false;
+static AasTls              tls           = { NULL, false, NULL, NULL };   // for an Operation's target - its strings strdup'd
 static const BridgeBroker* brokerP       = NULL;
 static volatile bool       stop          = false;
 static volatile bool       answered      = false;   // the server has answered, once: a write can go out
@@ -959,12 +958,14 @@ static void queueDrain(Queue* qP)
 //
 // aasBridgeOpen -
 //
-int aasBridgeOpen(const AasTarget* targetP, const char* _authorization, const char* _caFile, bool _insecure, const BridgeBroker* _brokerP)
+int aasBridgeOpen(const AasTarget* targetP, const char* _authorization, const AasTls* tlsP, const BridgeBroker* _brokerP)
 {
-  target        = *targetP;
-  authorization = (_authorization != NULL) ? strdup(_authorization) : NULL;
-  caFile        = (_caFile != NULL) ? strdup(_caFile) : NULL;
-  insecure      = _insecure;
+  target          = *targetP;
+  authorization   = (_authorization != NULL) ? strdup(_authorization) : NULL;
+  tls.caFile      = (tlsP->caFile     != NULL) ? strdup(tlsP->caFile)     : NULL;
+  tls.insecure    = tlsP->insecure;
+  tls.clientCert  = (tlsP->clientCert != NULL) ? strdup(tlsP->clientCert) : NULL;
+  tls.clientKey   = (tlsP->clientKey  != NULL) ? strdup(tlsP->clientKey)  : NULL;
   brokerP       = _brokerP;
   stop          = false;
   valuesAsText  = false;
@@ -1030,10 +1031,12 @@ void aasBridgeClose(void)
   endpointV = NULL;
   endpoints = 0;
 
-  free(authorization);
-  free(caFile);
+  if (authorization  != NULL) free(authorization);
+  if (tls.caFile     != NULL) free((char*) tls.caFile);
+  if (tls.clientCert != NULL) free((char*) tls.clientCert);
+  if (tls.clientKey  != NULL) free((char*) tls.clientKey);
   authorization = NULL;
-  caFile        = NULL;
+  memset(&tls, 0, sizeof(tls));
 
   aasTargetRelease(&target);
 }
@@ -1288,12 +1291,25 @@ int aasServiceExecute(const char* url, const char* executionId, const char* inpu
     return BRIDGE_ERR;
 
   //
-  // Its own target, the base path the Operation's path. The server's Authorization only to the server's host
+  // Its own target, the base path the Operation's path. The server's credentials - the Authorization, the
+  // OAuth2 token, the plugin's certificate - only to the server's host
   //
-  const char* why = aasTargetInit(&jP->target, httpUrl, NULL, caFile, insecure);
+  AasTls      other = { tls.caFile, tls.insecure, NULL, NULL };
+  const char* why   = aasTargetInit(&jP->target, httpUrl, NULL, &other);
+  bool        own   = (why == NULL) && (strcmp(jP->target.host, target.host) == 0) && (jP->target.port == target.port) && (jP->target.tls == target.tls);
 
-  if ((why == NULL) && (authorization != NULL) && (strcmp(jP->target.host, target.host) == 0) && (jP->target.port == target.port) && (jP->target.tls == target.tls))
-    snprintf(jP->target.authorization, sizeof(jP->target.authorization), "%s", authorization);
+  if ((own == true) && (tls.clientCert != NULL))
+  {
+    aasTargetRelease(&jP->target);
+    why = aasTargetInit(&jP->target, httpUrl, NULL, &tls);
+  }
+
+  if ((own == true) && (why == NULL))
+  {
+    if (authorization != NULL)
+      snprintf(jP->target.authorization, sizeof(jP->target.authorization), "%s", authorization);
+    jP->target.oauth2 = target.oauth2;
+  }
 
   if (why != NULL)
   {

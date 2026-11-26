@@ -136,9 +136,25 @@ cancelled.
 | `authorizationEnv` | the environment variable that holds the `Authorization` header's value (`Bearer ...`) - a credential is never in the file. Set and absent: the plugin is not loaded |
 | `caFile` | the PEM of the CAs the server's certificate is verified against. Absent: the system's CA certificates |
 | `insecure` | `true`: the certificate is not verified |
+| `clientCert` | the PEM of the plugin's own certificate (and its chain), for a server that asks for one - mutual TLS. Also shown to the OAuth2 token endpoint, and to an Operation's server when it is this one |
+| `clientKey` | its private key, PEM, not encrypted. Absent: in `clientCert`'s file |
+| `oauth2` | `{ "tokenUrl", "clientId", "clientSecretEnv", "scope" }` - an OAuth2 access token instead of `authorizationEnv`: the client credentials grant (RFC 6749, 4.4), the client's id and secret sent as HTTP Basic, the secret from the environment variable `clientSecretEnv` names; `scope` optional |
 
 The certificate must be issued to the url's host. The plugin's TLS is its own (OpenSSL, a context of its
 own): the broker's TLS settings are not touched.
+
+**The OAuth2 token** is fetched when the first request needs it and sent as `Authorization: Bearer <token>`.
+It is one token for the plugin, shared by its threads. It is fetched again a fifth of its life before it
+expires (at most 30 s before; no `expires_in`, only when refused), and when a request is answered 401 - that
+request is then sent once more, with the new token. No token to be had (the endpoint refuses, or does not
+answer): the AssetChannel is dormant, the reason says why. `caFile` and `insecure` hold for the token
+endpoint too.
+
+```json
+"server": { "url": "https://aas.acme.example/api/v3.0", "caFile": "/etc/coraine/aas-ca.pem",
+            "oauth2": { "tokenUrl": "https://login.acme.example/realms/aas/protocol/openid-connect/token",
+                        "clientId": "coraine", "clientSecretEnv": "AAS_CLIENT_SECRET", "scope": "aas.read" } }
+```
 
 ## Build and test
 
@@ -153,7 +169,8 @@ delegates goes to `test/funcTests/basyxDelegate.py`. BaSyx does not implement `$
 The other tests run on `test/funcTests/aasMock.py`, which plays the server: a shell with a Digital Nameplate and an operational-data
 submodel, PATCHes and invocations logged, a value that does not fit refused, three Operations, https with a
 certificate made by the test, and an Authorization header; `--values-as-text` makes it take numbers and
-booleans as strings only, as BaSyx does.
+booleans as strings only, as BaSyx does; `--oauth2` makes it a token endpoint too, `--client-ca` takes only a client
+with a certificate (`aas_oauth2`, `aas_mtls`).
 
 The broker must have AssetChannels; write-back (`COR_FEATURE_CHANNEL_WRITE_BACK`) for `"both"`, and Service
 Execution for the Operations.

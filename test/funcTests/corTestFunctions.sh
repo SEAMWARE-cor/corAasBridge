@@ -72,10 +72,13 @@ brokerStop() {
 
 # -----------------------------------------------------------------------------
 #
-# mockStart [--https] [--authorization <value>] [--values-as-text] - the mock AAS server (aasMock.py) on port $AAS_MOCK_PORT
+# mockStart [--https [--client-ca]] [--authorization <value>] [--oauth2 <id>:<secret> [--token-life <s>]] [--values-as-text]
+# - the mock AAS server (aasMock.py) on port $AAS_MOCK_PORT
 #
 # --https: with a certificate of its own, made here - issued to localhost and signed by a root of the test's
-# ($AAS_TEST_DIR/ca.pem). Its PATCHes and invocations go to $AAS_TEST_DIR/server.log.
+# ($AAS_TEST_DIR/ca.pem). --client-ca: it takes only a client with a certificate of that root - one is made,
+# $AAS_TEST_DIR/client.pem and client.key. --oauth2: also a token endpoint, POST /token (aasMock.py). Its
+# PATCHes, invocations and tokens go to $AAS_TEST_DIR/server.log.
 #
 AAS_MOCK_PORT="${AAS_MOCK_PORT:-18081}"
 
@@ -98,6 +101,18 @@ mockStart() {
         ;;
       --authorization)
         opts+=(--authorization "$2")
+        shift
+        ;;
+      --client-ca)                                    # after --https: the test CA issues the client a certificate too
+        local d="$AAS_TEST_DIR"
+        openssl req -newkey rsa:2048 -nodes -subj "/CN=aas test client" \
+                -keyout "$d/client.key" -out "$d/client.csr" > /dev/null 2>&1
+        openssl x509 -req -in "$d/client.csr" -CA "$d/ca.pem" -CAkey "$d/ca.key" -CAcreateserial -days 2 \
+                -out "$d/client.pem" > /dev/null 2>&1
+        opts+=(--client-ca "$d/ca.pem")
+        ;;
+      --oauth2|--token-life)
+        opts+=("$1" "$2")
         shift
         ;;
       --values-as-text)

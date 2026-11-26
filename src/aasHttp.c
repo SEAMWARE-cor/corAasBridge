@@ -20,6 +20,7 @@
 //
 #include <errno.h>                                    // errno, EAGAIN, EINTR
 #include <netdb.h>                                    // getaddrinfo
+#include <pthread.h>                                  // pthread_mutex_*
 #include <stdbool.h>                                  // bool
 #include <stdio.h>                                    // snprintf, sscanf
 #include <stdlib.h>                                   // malloc, realloc, free, strtol
@@ -27,11 +28,21 @@
 #include <strings.h>                                  // strncasecmp
 #include <sys/socket.h>                               // socket, connect, setsockopt
 #include <sys/time.h>                                 // struct timeval
+#include <time.h>                                     // time
 #include <unistd.h>                                   // close
 
 #include <openssl/err.h>                              // ERR_*
 #include <openssl/ssl.h>                              // SSL_*
 #include <openssl/x509.h>                             // X509_verify_cert_error_string
+
+#include "corAlloc/CorAlloc.h"                        // CorAlloc
+#include "corAlloc/corAllocBufferInit.h"              // corAllocBufferInit
+#include "corAlloc/corAllocBufferReset.h"             // corAllocBufferReset
+#include "corJson/CorJson.h"                          // CorJson
+#include "corJson/corJsonCreate.h"                    // corJsonCreate
+#include "corJson/corJsonParse.h"                     // corJsonParse
+#include "corTree/CorNode.h"                          // CorNode
+#include "corTree/corTreeLookup.h"                    // corTreeLookup
 
 #include "aasHttp.h"                                  // Own interface
 
@@ -82,8 +93,13 @@ typedef struct Reader
 //
 // aasTargetInit -
 //
-const char* aasTargetInit(AasTarget* tP, const char* url, const char* authorization, const char* caFile, bool insecure)
+const char* aasTargetInit(AasTarget* tP, const char* url, const char* authorization, const AasTls* tlsP)
 {
+  static const AasTls tlsDefault = { NULL, false, NULL, NULL };
+
+  if (tlsP == NULL)
+    tlsP = &tlsDefault;
+
   memset(tP, 0, sizeof(AasTarget));
 
   const char* rest;
@@ -154,11 +170,12 @@ const char* aasTargetInit(AasTarget* tP, const char* url, const char* authorizat
   if (ctxP == NULL)
     return "no TLS context";
 
-  if (insecure == true)
+  if (tlsP->insecure == true)
     SSL_CTX_set_verify(ctxP, SSL_VERIFY_NONE, NULL);
   else
   {
-    bool loaded = (caFile != NULL) ? (SSL_CTX_load_verify_locations(ctxP, caFile, NULL) == 1) : (SSL_CTX_set_default_verify_paths(ctxP) == 1);
+    const char* caFile = tlsP->caFile;
+    bool        loaded = (caFile != NULL) ? (SSL_CTX_load_verify_locations(ctxP, caFile, NULL) == 1) : (SSL_CTX_set_default_verify_paths(ctxP) == 1);
 
     if (loaded == false)
     {
@@ -168,6 +185,26 @@ const char* aasTargetInit(AasTarget* tP, const char* url, const char* authorizat
 
     SSL_CTX_set_verify(ctxP, SSL_VERIFY_PEER, NULL);
     tP->verifyHost = true;
+  }
+
+  //
+  // Mutual TLS: the plugin's certificate, shown when the server asks for one
+  //
+  if (tlsP->clientCert != NULL)
+  {
+    const char* keyFile = (tlsP->clientKey != NULL) ? tlsP->clientKey : tlsP->clientCert;
+
+    if (SSL_CTX_use_certificate_chain_file(ctxP, tlsP->clientCert) != 1)
+    {
+      SSL_CTX_free(ctxP);
+      return "server.clientCert is no PEM file of a certificate";
+    }
+
+    if ((SSL_CTX_use_PrivateKey_file(ctxP, keyFile, SSL_FILETYPE_PEM) != 1) || (SSL_CTX_check_private_key(ctxP) != 1))
+    {
+      SSL_CTX_free(ctxP);
+      return "server.clientKey is no PEM file of the private key of server.clientCert (not encrypted)";
+    }
   }
 
   tP->sslCtx = ctxP;
@@ -497,7 +534,7 @@ static void bodyAdd(Body* bP, const char* bytes, int n)
 //
 // exchange - the request sent and its response read: the status, the body to bP
 //
-static int exchange(AasTarget* tP, const char* method, const char* path, const char* body, const char* accept, Body* bP, int timeoutMs, volatile bool* stopP)
+static int exchange(AasTarget* tP, const char* method, const char* path, const char* body, const char* contentType, const char* authorization, const char* accept, Body* bP, int timeoutMs, volatile bool* stopP)
 {
   Conn conn;
 
@@ -507,15 +544,19 @@ static int exchange(AasTarget* tP, const char* method, const char* path, const c
     return 0;
 
   int   bodyLen = (body != NULL) ? (int) strlen(body) : 0;
-  char  auth[sizeof(tP->authorization) + 32] = "";
+  char  auth[4096 + 32] = "";
+  char  type[256]       = "";
   char  head[8192];
 
-  if (tP->authorization[0] != 0)
-    snprintf(auth, sizeof(auth), "Authorization: %s\r\n", tP->authorization);
+  if ((authorization != NULL) && (authorization[0] != 0))
+    snprintf(auth, sizeof(auth), "Authorization: %s\r\n", authorization);
+
+  if (body != NULL)
+    snprintf(type, sizeof(type), "Content-Type: %s\r\n", contentType);
 
   int   headLen = snprintf(head, sizeof(head),
                            "%s %s%s HTTP/1.1\r\nHost: %s\r\n%sAccept: %s\r\n%sContent-Length: %d\r\nConnection: close\r\n\r\n",
-                           method, tP->basePath, path, tP->host, auth, accept, (body != NULL) ? "Content-Type: application/json\r\n" : "", bodyLen);
+                           method, tP->basePath, path, tP->host, auth, accept, type, bodyLen);
 
   if ((headLen >= (int) sizeof(head)) || (connWrite(&conn, head, headLen) == false) || ((bodyLen > 0) && (connWrite(&conn, body, bodyLen) == false)))
   {
@@ -613,26 +654,331 @@ static int exchange(AasTarget* tP, const char* method, const char* path, const c
 
 // -----------------------------------------------------------------------------
 //
+// oauth - the OAuth2 client credentials grant: the token endpoint, the request for a token, the token
+//
+static struct
+{
+  pthread_mutex_t  mutex;
+  bool             on;
+  AasTarget        endpoint;                          // the token endpoint, its path the base path
+  char             basic[1024];                       // "Basic <base64 of id:secret>"
+  char             body[1024];                        // "grant_type=client_credentials[&scope=...]"
+  char             token[4096];                       // "Bearer <access_token>"; "": none
+  time_t           until;                             // fetched again from then on; 0: when a request is refused
+  int              generation;                        // which token: a 401 drops only the one it was sent with
+} oauth = { PTHREAD_MUTEX_INITIALIZER, false };
+
+
+
+// -----------------------------------------------------------------------------
+//
+// formEncode - application/x-www-form-urlencoded, into out; false: does not fit
+//
+static bool formEncode(const char* in, char* out, int size)
+{
+  static const char hex[] = "0123456789ABCDEF";
+  int               o     = 0;
+
+  for (const unsigned char* p = (const unsigned char*) in; *p != 0; p++)
+  {
+    if (o + 4 > size)
+      return false;
+
+    if (((*p >= 'A') && (*p <= 'Z')) || ((*p >= 'a') && (*p <= 'z')) || ((*p >= '0') && (*p <= '9')) || (strchr("-._~", *p) != NULL))
+      out[o++] = *p;
+    else if (*p == ' ')
+      out[o++] = '+';
+    else
+    {
+      out[o++] = '%';
+      out[o++] = hex[*p >> 4];
+      out[o++] = hex[*p & 0xF];
+    }
+  }
+
+  out[o] = 0;
+  return true;
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
+// base64 - standard alphabet, padded, into out; false: does not fit
+//
+static bool base64(const char* in, char* out, int size)
+{
+  static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  const unsigned char* p   = (const unsigned char*) in;
+  int                  len = strlen(in);
+
+  if ((len + 2) / 3 * 4 + 1 > size)
+    return false;
+
+  int o = 0;
+
+  for (int ix = 0; ix < len; ix += 3)
+  {
+    unsigned int n = p[ix] << 16;
+
+    if (ix + 1 < len) n |= p[ix + 1] << 8;
+    if (ix + 2 < len) n |= p[ix + 2];
+
+    out[o++] = alphabet[(n >> 18) & 63];
+    out[o++] = alphabet[(n >> 12) & 63];
+    out[o++] = (ix + 1 < len) ? alphabet[(n >> 6) & 63] : '=';
+    out[o++] = (ix + 2 < len) ? alphabet[n & 63] : '=';
+  }
+
+  out[o] = 0;
+  return true;
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
+// aasOauth2Init -
+//
+const char* aasOauth2Init(const char* tokenUrl, const char* clientId, const char* clientSecret, const char* scope, const AasTls* tlsP)
+{
+  char id[256];
+  char secret[512];
+  char pair[1024];
+
+  const char* why = aasTargetInit(&oauth.endpoint, tokenUrl, NULL, tlsP);
+
+  if (why != NULL)
+    return (strncmp(why, "server.url", 10) == 0) ? "server.oauth2.tokenUrl is http[s]://<host>[:<port>]/<path>" : why;
+
+  if ((formEncode(clientId, id, sizeof(id)) == false) || (formEncode(clientSecret, secret, sizeof(secret)) == false))
+  {
+    aasTargetRelease(&oauth.endpoint);
+    return "server.oauth2: the client id or its secret is too long";
+  }
+
+  snprintf(pair, sizeof(pair), "%s:%s", id, secret);
+  strcpy(oauth.basic, "Basic ");
+
+  if (base64(pair, &oauth.basic[6], sizeof(oauth.basic) - 6) == false)
+  {
+    aasTargetRelease(&oauth.endpoint);
+    return "server.oauth2: the client id or its secret is too long";
+  }
+
+  strcpy(oauth.body, "grant_type=client_credentials");
+
+  if (scope != NULL)
+  {
+    char encoded[900];
+
+    if (formEncode(scope, encoded, sizeof(encoded)) == false)
+    {
+      aasTargetRelease(&oauth.endpoint);
+      return "server.oauth2.scope is too long";
+    }
+
+    snprintf(&oauth.body[strlen(oauth.body)], sizeof(oauth.body) - strlen(oauth.body), "&scope=%s", encoded);
+  }
+
+  oauth.token[0]   = 0;
+  oauth.until      = 0;
+  oauth.generation = 0;
+  oauth.on         = true;
+  return NULL;
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
+// aasOauth2Release -
+//
+void aasOauth2Release(void)
+{
+  pthread_mutex_lock(&oauth.mutex);
+
+  if (oauth.on == true)
+    aasTargetRelease(&oauth.endpoint);
+
+  memset(oauth.basic, 0, sizeof(oauth.basic));
+  memset(oauth.token, 0, sizeof(oauth.token));
+  oauth.on = false;
+
+  pthread_mutex_unlock(&oauth.mutex);
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
+// tokenFetch - a token from the endpoint (the mutex held): { "access_token", "token_type", "expires_in" }
+//
+static bool tokenFetch(int timeoutMs)
+{
+  Body* bP = calloc(1, sizeof(Body));
+
+  if (bP == NULL)
+    return false;
+
+  int status = exchange(&oauth.endpoint, "POST", "", oauth.body, "application/x-www-form-urlencoded", oauth.basic, "application/json", bP, timeoutMs, NULL);
+
+  if (status == 0)
+  {
+    char why[400];
+
+    snprintf(why, sizeof(why), "%.399s", error);
+    snprintf(error, sizeof(error), "the OAuth2 token endpoint: %.400s", (why[0] != 0) ? why : "no answer");
+    free(bP->buf);
+    free(bP);
+    return false;
+  }
+
+  CorAlloc    ka;
+  CorJson     cj;
+  char        kaBuf[8 * 1024];
+  CorNode*    rootP   = NULL;
+  bool        ok      = false;
+
+  corAllocBufferInit(&ka, kaBuf, sizeof(kaBuf), 16 * 1024, NULL, "aas oauth2");
+  corJsonCreate(&cj, &ka);
+
+  if ((status == 200) && (bP->tooBig == false) && (bP->buf != NULL))
+    rootP = corJsonParse(&cj, bP->buf);
+
+  CorNode* tokenP   = ((rootP != NULL) && (rootP->type == CorObject)) ? corTreeLookup(rootP, "access_token") : NULL;
+  CorNode* expiresP = ((rootP != NULL) && (rootP->type == CorObject)) ? corTreeLookup(rootP, "expires_in")   : NULL;
+
+  if ((tokenP == NULL) || (tokenP->type != CorString) || (tokenP->value.s[0] == 0))
+    snprintf(error, sizeof(error), "the OAuth2 token endpoint answered %d, %s", status, (status == 200) ? "no access_token" : "no token");
+  else if ((strlen(tokenP->value.s) + 8 > sizeof(oauth.token)) || (strpbrk(tokenP->value.s, "\r\n") != NULL))
+    snprintf(error, sizeof(error), "the OAuth2 token endpoint gave an access_token that is too long, or more than one line");
+  else
+  {
+    //
+    // The token is sent as a bearer token (RFC 6750) - the only token_type the grant gives in practice.
+    // Fetched again a fifth of its life (at most 30 s) before it expires; no expires_in: when refused
+    //
+    long expires = 0;
+
+    if ((expiresP != NULL) && (expiresP->type == CorInt))
+      expires = (long) expiresP->value.i;
+    else if ((expiresP != NULL) && (expiresP->type == CorFloat))
+      expires = (long) expiresP->value.f;
+    else if ((expiresP != NULL) && (expiresP->type == CorString))
+      expires = atol(expiresP->value.s);
+
+    snprintf(oauth.token, sizeof(oauth.token), "Bearer %s", tokenP->value.s);
+    oauth.until = (expires > 0) ? time(NULL) + expires - ((expires / 5 < 30) ? expires / 5 : 30) : 0;
+    oauth.generation++;
+    ok = true;
+  }
+
+  corAllocBufferReset(&ka, false);
+  free(bP->buf);
+  free(bP);
+  return ok;
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
+// tokenGet - the Authorization for a request, and which token it is; fetched when there is none, or it is
+// about to expire. false: no token to be had (why in error)
+//
+static bool tokenGet(char* out, int size, int* generationP, int timeoutMs)
+{
+  bool ok = true;
+
+  pthread_mutex_lock(&oauth.mutex);
+
+  if (oauth.on == false)
+  {
+    snprintf(error, sizeof(error), "no OAuth2 token endpoint");
+    ok = false;
+  }
+  else if ((oauth.token[0] == 0) || ((oauth.until != 0) && (time(NULL) >= oauth.until)))
+    ok = tokenFetch(timeoutMs);
+
+  if (ok == true)
+  {
+    snprintf(out, size, "%s", oauth.token);
+    *generationP = oauth.generation;
+  }
+
+  pthread_mutex_unlock(&oauth.mutex);
+  return ok;
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
+// tokenDrop - a request with token 'generation' answered 401: that token no longer used (a newer one stays)
+//
+static void tokenDrop(int generation)
+{
+  pthread_mutex_lock(&oauth.mutex);
+
+  if (oauth.generation == generation)
+    oauth.token[0] = 0;
+
+  pthread_mutex_unlock(&oauth.mutex);
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
 // aasRequest -
 //
 int aasRequest(AasTarget* tP, const char* method, const char* path, const char* body, char** bodyP, int timeoutMs)
 {
-  Body* bP = calloc(1, sizeof(Body));
-
   *bodyP = NULL;
 
-  if (bP == NULL)
-    return 0;
+  for (int attempt = 0; attempt < 2; attempt++)
+  {
+    char        bearer[sizeof(oauth.token)];
+    int         generation    = 0;
+    const char* authorization = tP->authorization;
 
-  int status = exchange(tP, method, path, body, "application/json", bP, timeoutMs, NULL);
+    if (tP->oauth2 == true)
+    {
+      if (tokenGet(bearer, sizeof(bearer), &generation, timeoutMs) == false)
+        return 0;
 
-  if ((bP->tooBig == false) && (bP->buf != NULL))
-    *bodyP = bP->buf;
-  else
-    free(bP->buf);
+      authorization = bearer;
+    }
 
-  free(bP);
-  return status;
+    Body* bP = calloc(1, sizeof(Body));
+
+    if (bP == NULL)
+      return 0;
+
+    int status = exchange(tP, method, path, body, "application/json", authorization, "application/json", bP, timeoutMs, NULL);
+
+    //
+    // 401 with the token: it is no longer taken (revoked, expired early) - a new one, the request once more
+    //
+    if ((status == 401) && (tP->oauth2 == true) && (attempt == 0))
+    {
+      free(bP->buf);
+      free(bP);
+      tokenDrop(generation);
+      continue;
+    }
+
+    if ((bP->tooBig == false) && (bP->buf != NULL))
+      *bodyP = bP->buf;
+    else
+      free(bP->buf);
+
+    free(bP);
+    return status;
+  }
+
+  return 0;
 }
 
 

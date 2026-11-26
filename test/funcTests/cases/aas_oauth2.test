@@ -1,0 +1,167 @@
+#
+# FILE            aas_oauth2.test
+#
+# Copyright 2026 Seamware
+# SPDX-License-Identifier: Apache-2.0
+#
+# An AAS server behind OAuth2, the client credentials grant (RFC 6749, 4.4): server.oauth2 { tokenUrl, clientId,
+# clientSecretEnv, scope } - the secret from the environment variable clientSecretEnv names, never from the file.
+# The mock is the token endpoint too (--oauth2 bridge:s3cret, tokens valid 10 s); the model polled every 0.3 s:
+#
+#   the first request                     a token fetched (its scope asked for), the request sent with it
+#   the token about to expire             a new one fetched before (a fifth of its life, at most 30 s)
+#   the token revoked at the server       the request answered 401: a new token, the request sent again - still
+#                                         available, a value that changes comes in
+#   a wrong secret                        dormant: the token endpoint refuses (401)
+#   clientSecretEnv not set               the plugin is not loaded: the broker does not start
+#   authorizationEnv and oauth2           the broker does not start - one of them
+#
+# REQUIRE_FEATURE: ASSET_CHANNELS
+#
+--NAME--
+aas bridge - OAuth2 client credentials: a token fetched, renewed before it expires, and again after a 401
+
+--TAGS--
+bridge aas
+
+--INIT--
+rm -rf "${AAS_TEST_DIR:?}"
+mkdir -p "$AAS_TEST_DIR"
+mockStart --oauth2 bridge:s3cret --token-life 10
+
+--RUN--
+SH=https://acme.example/ids/aas/press-17
+OP=https://acme.example/ids/sm/press-17/operational
+D=$AAS_TEST_DIR
+config() {  # config [server members] - the bridge configuration
+  cat > $D/bridges.json <<J
+{ "aas": { "server": { "url": "http://localhost:$AAS_MOCK_PORT",
+                       "oauth2": { "tokenUrl": "http://localhost:$AAS_MOCK_PORT/token", "clientId": "bridge",
+                                   "clientSecretEnv": "AAS_TEST_SECRET", "scope": "aas.read aas.write" } $1 },
+           "ngsild": { "defaultEntity": false, "assetChannels": {
+             "$SH": { "entities": "natural", "channelInfo": [ { "key": "pollInterval", "value": "PT0.3S" } ] } } } } }
+J
+}
+
+echo "01. The first request - a token fetched, its scope asked for; available, the entities"
+echo "====================================================================================="
+config
+AAS_TEST_SECRET=s3cret brokerStart
+entityAwait $OP pressure 212.5
+entityGet $OP pressure keyValues
+grep '^token' $D/server.log
+echo
+echo
+
+
+echo "02. The token about to expire (10 s) - a new one fetched before: no request refused"
+echo "==================================================================================="
+serverAwait 'token 2 scope=aas.read aas.write' 15
+grep -E '^(token|refused)' $D/server.log
+mockSet $OP Pressure '"220"'
+entityAwait $OP pressure 220
+entityGet $OP pressure keyValues
+echo
+echo
+
+
+echo "03. The token revoked at the server - 401, a new token, the request sent again: available, values in"
+echo "===================================================================================================="
+curl -s -o /dev/null -X POST "localhost:$AAS_MOCK_PORT/test/revoke" -d '{}'
+serverAwait 'token 3 scope=aas.read aas.write'
+mockSet $OP Pressure '"230"'
+entityAwait $OP pressure 230
+entityGet $OP pressure keyValues
+grep -E '^(token|refused)' $D/server.log
+assetChannels
+echo
+echo
+
+
+echo "04. A wrong secret - the token endpoint refuses: dormant"
+echo "========================================================"
+AAS_TEST_SECRET=wrong brokerStart
+channelAwait $SH dormant
+assetChannels
+echo
+echo
+
+
+echo "05. clientSecretEnv names a variable that is not set - the broker does not start"
+echo "================================================================================"
+brokerStop
+brokerStart 2> /dev/null || echo "brokerStart failed"
+grep -o 'aas: server.oauth2.clientSecretEnv names an environment variable that is not set' "$D/broker.log"
+echo
+echo
+
+
+echo "06. authorizationEnv and oauth2 - the broker does not start"
+echo "==========================================================="
+config ', "authorizationEnv": "AAS_TEST_AUTHORIZATION"'
+AAS_TEST_SECRET=s3cret AAS_TEST_AUTHORIZATION="Bearer x" brokerStart 2> /dev/null || echo "brokerStart failed"
+grep -o 'aas: server.authorizationEnv and server.oauth2 - one of them' "$D/broker.log"
+echo
+echo
+
+
+--TEARDOWN--
+brokerStop
+mockStop
+rm -f "${AAS_TEST_DIR:?}/bridges.json"
+
+--EXPECT--
+01. The first request - a token fetched, its scope asked for; available, the entities
+=====================================================================================
+{
+  "id": "https://acme.example/ids/sm/press-17/operational",
+  "pressure": 212.5,
+  "type": "OperationalData"
+}
+token 1 scope=aas.read aas.write
+
+
+02. The token about to expire (10 s) - a new one fetched before: no request refused
+===================================================================================
+token 2 scope=aas.read aas.write
+token 1 scope=aas.read aas.write
+token 2 scope=aas.read aas.write
+{
+  "id": "https://acme.example/ids/sm/press-17/operational",
+  "pressure": 220,
+  "type": "OperationalData"
+}
+
+
+03. The token revoked at the server - 401, a new token, the request sent again: available, values in
+====================================================================================================
+token 3 scope=aas.read aas.write
+{
+  "id": "https://acme.example/ids/sm/press-17/operational",
+  "pressure": 230,
+  "type": "OperationalData"
+}
+token 1 scope=aas.read aas.write
+token 2 scope=aas.read aas.write
+refused Bearer tok-2
+token 3 scope=aas.read aas.write
+https://acme.example/ids/aas/press-17 available - in valuesIn=2 valuesOut=-
+
+
+04. A wrong secret - the token endpoint refuses: dormant
+========================================================
+https://acme.example/ids/aas/press-17 dormant GET /shells/aHR0cHM6Ly9hY21lLmV4YW1wbGUvaWRzL2Fhcy9wcmVzcy0xNw: the OAuth2 token endpoint answered 401, no token in valuesIn=0 valuesOut=-
+
+
+05. clientSecretEnv names a variable that is not set - the broker does not start
+================================================================================
+brokerStart failed
+aas: server.oauth2.clientSecretEnv names an environment variable that is not set
+
+
+06. authorizationEnv and oauth2 - the broker does not start
+===========================================================
+brokerStart failed
+aas: server.authorizationEnv and server.oauth2 - one of them
+
+

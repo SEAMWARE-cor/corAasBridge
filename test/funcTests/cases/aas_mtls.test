@@ -1,0 +1,142 @@
+#
+# FILE            aas_mtls.test
+#
+# Copyright 2026 Seamware
+# SPDX-License-Identifier: Apache-2.0
+#
+# Mutual TLS: an AAS server on https that takes only a client with a certificate of its CA (the mock's
+# --client-ca). server.clientCert names the plugin's certificate, server.clientKey its private key - or the key is
+# in clientCert's file:
+#
+#   clientCert, clientKey                 available - the entities
+#   no clientCert                         dormant: the server refuses the handshake
+#   clientCert, the key in its file       available
+#   clientKey, no clientCert              the plugin is not loaded: the broker does not start
+#   clientCert, the url http              the broker does not start
+#   a key that is not the certificate's   the broker does not start
+#
+# REQUIRE_FEATURE: ASSET_CHANNELS
+#
+--NAME--
+aas bridge - mutual TLS: the plugin's certificate, server.clientCert and clientKey
+
+--TAGS--
+bridge aas
+
+--INIT--
+rm -rf "${AAS_TEST_DIR:?}"
+mkdir -p "$AAS_TEST_DIR"
+mockStart --https --client-ca
+
+--RUN--
+SH=https://acme.example/ids/aas/press-17
+D=$AAS_TEST_DIR
+config() {  # config <server members> [scheme] - the bridge configuration
+  cat > $D/bridges.json <<J
+{ "aas": { "server": { "url": "${2:-https}://localhost:$AAS_MOCK_PORT", "caFile": "$D/ca.pem" $1 },
+           "ngsild": { "defaultEntity": false, "assetChannels": { "$SH": { "entities": "natural" } } } } }
+J
+}
+
+echo "01. clientCert, clientKey - available, the shell"
+echo "================================================"
+config ", \"clientCert\": \"$D/client.pem\", \"clientKey\": \"$D/client.key\""
+brokerStart
+entityAwait $SH assetKind Instance
+entityGet $SH assetKind keyValues
+echo
+echo
+
+
+echo "02. No clientCert - the server refuses the handshake: dormant"
+echo "============================================================="
+config ""
+brokerStart
+channelAwait $SH dormant
+assetChannels | grep -c "$SH dormant"
+echo
+echo
+
+
+echo "03. clientCert, the key in the same file - available"
+echo "===================================================="
+cat $D/client.pem $D/client.key > $D/client-both.pem
+config ", \"clientCert\": \"$D/client-both.pem\""
+brokerStart
+channelAwait $SH available
+assetChannels
+echo
+echo
+
+
+echo "04. clientKey without clientCert - the broker does not start"
+echo "============================================================"
+brokerStop
+config ", \"clientKey\": \"$D/client.key\""
+brokerStart 2> /dev/null || echo "brokerStart failed"
+grep -o 'aas: server.clientKey without server.clientCert' "$D/broker.log"
+echo
+echo
+
+
+echo "05. clientCert, the url http - the broker does not start"
+echo "========================================================"
+config ", \"clientCert\": \"$D/client-both.pem\"" http
+brokerStart 2> /dev/null || echo "brokerStart failed"
+grep -o 'aas: server.clientCert - the url is not https' "$D/broker.log"
+echo
+echo
+
+
+echo "06. A key that is not the certificate's - the broker does not start"
+echo "==================================================================="
+config ", \"clientCert\": \"$D/client.pem\", \"clientKey\": \"$D/server.key\""
+brokerStart 2> /dev/null || echo "brokerStart failed"
+grep -o 'aas: server.clientKey is no PEM file of the private key of server.clientCert (not encrypted)' "$D/broker.log"
+echo
+echo
+
+
+--TEARDOWN--
+brokerStop
+mockStop
+rm -f "${AAS_TEST_DIR:?}/bridges.json"
+
+--EXPECT--
+01. clientCert, clientKey - available, the shell
+================================================
+{
+  "assetKind": "Instance",
+  "id": "https://acme.example/ids/aas/press-17",
+  "type": "Shell"
+}
+
+
+02. No clientCert - the server refuses the handshake: dormant
+=============================================================
+1
+
+
+03. clientCert, the key in the same file - available
+====================================================
+https://acme.example/ids/aas/press-17 available - in valuesIn=0 valuesOut=-
+
+
+04. clientKey without clientCert - the broker does not start
+============================================================
+brokerStart failed
+aas: server.clientKey without server.clientCert
+
+
+05. clientCert, the url http - the broker does not start
+========================================================
+brokerStart failed
+aas: server.clientCert - the url is not https
+
+
+06. A key that is not the certificate's - the broker does not start
+===================================================================
+brokerStart failed
+aas: server.clientKey is no PEM file of the private key of server.clientCert (not encrypted)
+
+

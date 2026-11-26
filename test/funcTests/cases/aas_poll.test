@@ -34,7 +34,7 @@ cat > $AAS_TEST_DIR/bridges.json <<J
              "urn:nothing":                           { "entities": "natural" },
              "urn:badPoll":                           { "entities": "natural", "channelInfo": [ { "key": "pollInterval", "value": "5s" } ] } } } } }
 J
-mockStart
+mockStart --log-requests
 brokerStart
 
 --RUN--
@@ -72,6 +72,8 @@ echo
 echo "04. Mode removed at the source - the model again; mode is left alone"
 echo "===================================================================="
 mockRemove $OP Mode
+: > $AAS_TEST_DIR/server.log                         # two reads of the submodel since: the first saw the removal, alone
+for i in $(seq 1 100); do [ $(grep -c "^GET localhost /submodels/$(b64url $OP) " $AAS_TEST_DIR/server.log) -ge 2 ] && break; sleep 0.05; done
 mockSet $OP Pressure '"231"'
 entityAwait $OP pressure 231
 entityGet $OP pressure,temperature,mode keyValues
@@ -177,7 +179,7 @@ rm -f "${AAS_TEST_DIR:?}/bridges.json"
 
 06. GET /assetChannels - urn:nothing dormant (no such shell), urn:badPoll refused
 =================================================================================
-https://acme.example/ids/aas/press-17 available - in valuesIn=2 valuesOut=-
+https://acme.example/ids/aas/press-17 available - in valuesIn=3 valuesOut=-
 https://acme.example/ids/aas/press-18 available - in valuesIn=0 valuesOut=-
 urn:badPoll dormant channelInfo pollInterval is an ISO 8601 duration of at least 0.1 s - PT5S, PT0.5S, PT1M in valuesIn=0 valuesOut=-
 urn:nothing dormant the server has no shell and no submodel 'urn:nothing' in valuesIn=0 valuesOut=-
@@ -185,7 +187,7 @@ urn:nothing dormant the server has no shell and no submodel 'urn:nothing' in val
 
 07. The server stops - press-17 dormant, why
 ============================================
-https://acme.example/ids/aas/press-17 dormant GET /shells/aHR0cHM6Ly9hY21lLmV4YW1wbGUvaWRzL2Fhcy9wcmVzcy0xNw: connect: Connection refused in valuesIn=2 valuesOut=-
+https://acme.example/ids/aas/press-17 dormant GET /shells/aHR0cHM6Ly9hY21lLmV4YW1wbGUvaWRzL2Fhcy9wcmVzcy0xNw: connect: Connection refused in valuesIn=3 valuesOut=-
 
 
 08. The server back (as it started) - available, the model as it has it: pressure 212.5, mode again

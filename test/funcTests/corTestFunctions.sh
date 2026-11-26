@@ -410,6 +410,7 @@ urlEncode() {
 # test's delegate); returns once BaSyx answers
 #
 AAS_BASYX_PORT="${AAS_BASYX_PORT:-18082}"
+AAS_BASYX_MQTT_PORT="${AAS_BASYX_MQTT_PORT:-18885}"
 AAS_DELEGATE_PORT="${AAS_DELEGATE_PORT:-18083}"
 
 basyxEnv() {
@@ -419,11 +420,13 @@ basyxEnv() {
       AAS_DELEGATE_HOST="${AAS_DELEGATE_HOST:-$(hostname -I | awk '{print $1}')}"
       ;;
     *)
+      docker network create aas-test > /dev/null 2>&1   # BaSyx and its MQTT broker; the host is its gateway
       AAS_BASYX_URL="http://127.0.0.1:$AAS_BASYX_PORT"
-      AAS_DELEGATE_HOST="${AAS_DELEGATE_HOST:-$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null)}"
+      AAS_BASYX_MQTT_URL="mqtt://localhost:$AAS_BASYX_MQTT_PORT"
+      AAS_DELEGATE_HOST="${AAS_DELEGATE_HOST:-$(docker network inspect aas-test -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null)}"
       ;;
   esac
-  export AAS_BASYX_URL AAS_DELEGATE_HOST
+  export AAS_BASYX_URL AAS_BASYX_MQTT_URL AAS_DELEGATE_HOST
 }
 
 basyxStart() {
@@ -431,9 +434,16 @@ basyxStart() {
   case "$AAS_BASYX" in
     http://*|https://*) ;;
     *)
-      docker rm -f aas-test-basyx > /dev/null 2>&1
-      docker run -d --rm --name aas-test-basyx -p "127.0.0.1:$AAS_BASYX_PORT:8081" \
+      #
+      # Its MQTT broker first - BaSyx connects at its start, its events (the mqtt feature) to the broker; the
+      # same broker as CI's service, eclipse-mosquitto 1.6 (anonymous, every interface, no configuration)
+      #
+      docker rm -f aas-test-basyx aas-test-mqtt > /dev/null 2>&1
+      docker run -d --rm --name aas-test-mqtt --network aas-test --network-alias mqtt -p "127.0.0.1:$AAS_BASYX_MQTT_PORT:1883" \
+             eclipse-mosquitto:1.6 > "$AAS_TEST_DIR/basyx-mqtt.id" 2>&1 || { cat "$AAS_TEST_DIR/basyx-mqtt.id" >&2; return 1; }
+      docker run -d --rm --name aas-test-basyx --network aas-test -p "127.0.0.1:$AAS_BASYX_PORT:8081" \
              -e BASYX_SUBMODELREPOSITORY_FEATURE_OPERATION_DELEGATION_SECURITY_DENYPRIVATETARGETS=false \
+             -e BASYX_FEATURE_MQTT_ENABLED=true -e MQTT_CLIENTID=aas-test-basyx -e MQTT_HOSTNAME=mqtt -e MQTT_PORT=1883 \
              "$AAS_BASYX" > "$AAS_TEST_DIR/basyx.id" 2>&1 || { cat "$AAS_TEST_DIR/basyx.id" >&2; return 1; }
       ;;
   esac
@@ -456,7 +466,7 @@ basyxStart() {
 basyxStop() {
   case "$AAS_BASYX" in
     http://*|https://*) ;;
-    *) docker rm -f aas-test-basyx > /dev/null 2>&1 ;;
+    *) docker rm -f aas-test-basyx aas-test-mqtt > /dev/null 2>&1 ;;
   esac
   return 0
 }
@@ -485,22 +495,40 @@ basyxPost() {
 # the API under /api/v3.0, an empty model. AAS_FAAAST_URL: where its API is
 #
 AAS_FAAAST_PORT="${AAS_FAAAST_PORT:-18084}"
+AAS_FAAAST_MQTT_PORT="${AAS_FAAAST_MQTT_PORT:-18886}"
 
 faaastEnv() {
   case "$AAS_FAAAST" in
-    http://*|https://*) AAS_FAAAST_URL="$AAS_FAAAST" ;;
-    *)                  AAS_FAAAST_URL="https://localhost:$AAS_FAAAST_PORT/api/v3.0" ;;
+    http://*|https://*) AAS_FAAAST_URL="$AAS_FAAAST"; AAS_FAAAST_MQTT_URL="${AAS_FAAAST_MQTT_URL:-}" ;;
+    *)                  AAS_FAAAST_URL="https://localhost:$AAS_FAAAST_PORT/api/v3.0"; AAS_FAAAST_MQTT_URL="mqtt://localhost:$AAS_FAAAST_MQTT_PORT" ;;
   esac
-  export AAS_FAAAST_URL
+  export AAS_FAAAST_URL AAS_FAAAST_MQTT_URL
 }
 
+#
+# faaastStart - FA³ST with its events on MQTT (MessageBusMqtt, its own broker): an image, in docker - the
+# configuration the message bus only, FA³ST's defaults else (https on 443, a self-signed certificate); a jar
+# (<...>.jar: the release's starter, run here with java - CI) - the HTTP endpoint on $AAS_FAAAST_PORT too.
+# A URL: started already, by whoever gave it (its events: $AAS_FAAAST_MQTT_URL, if any)
+#
 faaastStart() {
   faaastEnv
+  local bus='"@class": "de.fraunhofer.iosb.ilt.faaast.service.messagebus.mqtt.MessageBusMqtt", "useInternalServer": true'
   case "$AAS_FAAAST" in
     http://*|https://*) ;;
+    *.jar)
+      faaastStop
+      printf '{ "endpoints": [ { "@class": "de.fraunhofer.iosb.ilt.faaast.service.endpoint.http.HttpEndpoint", "port": %s } ],\n  "messageBus": { %s, "host": "127.0.0.1", "port": %s } }\n' \
+             "$AAS_FAAAST_PORT" "$bus" "$AAS_FAAAST_MQTT_PORT" > "$AAS_TEST_DIR/faaast.json"
+      mkdir -p "$AAS_TEST_DIR/faaast-run"
+      (cd "$AAS_TEST_DIR/faaast-run" && exec java -jar "$AAS_FAAAST" --config "$AAS_TEST_DIR/faaast.json" > "$AAS_TEST_DIR/faaast.log" 2>&1) &
+      echo $! > "$AAS_TEST_DIR/faaast.pid"
+      ;;
     *)
+      printf '{ "messageBus": { %s, "host": "0.0.0.0", "port": 1883 } }\n' "$bus" > "$AAS_TEST_DIR/faaast.json"
       docker rm -f aas-test-faaast > /dev/null 2>&1
-      docker run -d --rm --name aas-test-faaast -p "127.0.0.1:$AAS_FAAAST_PORT:443" "$AAS_FAAAST" \
+      docker run -d --rm --name aas-test-faaast -p "127.0.0.1:$AAS_FAAAST_PORT:443" -p "127.0.0.1:$AAS_FAAAST_MQTT_PORT:1883" \
+             -v "$AAS_TEST_DIR/faaast.json:/app/config.json:ro" "$AAS_FAAAST" \
              > "$AAS_TEST_DIR/faaast.id" 2>&1 || { cat "$AAS_TEST_DIR/faaast.id" >&2; return 1; }
       ;;
   esac
@@ -512,12 +540,24 @@ faaastStart() {
   done
 
   echo "faaastStart: no answer from $AAS_FAAAST_URL after 60s" >&2
+  [ -f "$AAS_TEST_DIR/faaast.log" ] && tail -20 "$AAS_TEST_DIR/faaast.log" >&2
   return 1
 }
 
 faaastStop() {
   case "$AAS_FAAAST" in
     http://*|https://*) ;;
+    *.jar)
+      local pidFile="$AAS_TEST_DIR/faaast.pid" pid i
+      [ -f "$pidFile" ] || return 0
+      pid=$(cat "$pidFile")
+      kill "$pid" 2>/dev/null
+      for ((i = 0; i < 100; i++)); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.1
+      done
+      rm -f "$pidFile"
+      ;;
     *) docker rm -f aas-test-faaast > /dev/null 2>&1 ;;
   esac
   return 0

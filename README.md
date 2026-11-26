@@ -199,6 +199,7 @@ The MQTT broker's own credentials and TLS - the AAS server's never go to it:
 | `caFile` | mqtts: the PEM of the CAs the broker's certificate is verified against. Absent: the system's (`/etc/ssl/certs`) |
 | `insecure` | mqtts, `true`: the broker's certificate not verified - neither its chain nor its host name |
 | `clientCert`, `clientKey` | mqtts: the plugin's own certificate, for a broker that wants one; the key not encrypted, in `clientCert`'s file when `clientKey` is absent |
+| `clientId` | the MQTT client id. Absent: `coraine-aas-<8 hex digits>`, random (some brokers refuse an empty one - FA³ST's: `identifier rejected`) |
 
 A connection that fails says why, once - the broker's refusal (`not authorised`) or the TLS error (`certificate
 verify failed`, `certificate required`); it is tried again, the AssetChannels polled meanwhile.
@@ -212,11 +213,17 @@ verify failed`, `certificate required`); it is tried again, the AssetChannels po
 service, `AAS_BASYX_URL`), or `off` (the test is skipped). It POSTs its own shell and submodel; an Operation BaSyx
 delegates goes to `test/funcTests/basyxDelegate.py`. A list is written by a PUT of the element (Write-back, above).
 
-`aas_faaast` runs against a second real server, FA³ST Service 1.3 (Fraunhofer IOSB): corTest's `-faaast`, as `-basyx`
-(CI's service, `AAS_FAAAST_URL`), with FA³ST's defaults - https with a self-signed certificate (`insecure`). FA³ST takes
+`aas_faaast` runs against a second real server, FA³ST Service 1.3 (Fraunhofer IOSB): corTest's `-faaast` - its
+release's starter jar, run with java (CI: `AAS_FAAAST_JAR`), an image started in docker (the default when docker
+answers), a URL, or `off` - with FA³ST's defaults: https with a self-signed certificate (`insecure`). FA³ST takes
 ValueOnly numbers and booleans as JSON, no fallback needed. It runs an Operation only through an asset connection of
 its own configuration - without one it answers 500, the client 502 with its reason. A list is written by a PUT of the
 element (Write-back, above).
+
+`aas_basyx_push` and `aas_faaast_push` take each server's own MQTT events: BaSyx with its mqtt feature, to an
+eclipse-mosquitto 1.6 beside it (in docker; CI's service `mqtt`, `AAS_BASYX_MQTT_URL`); FA³ST with MessageBusMqtt,
+its own broker (the configuration the test gives it). The AssetChannel polled every 60 s, a change at the server
+comes in within 3 s; a client reading an element at the server makes no read.
 
 The other tests run on `test/funcTests/aasMock.py`, which plays the server: a shell with a Digital Nameplate and an operational-data
 submodel, PATCHes and invocations logged, a value that does not fit refused, three Operations, https with a

@@ -28,22 +28,25 @@ jobs:
       SEAMWARE_PLUGIN_DIR: /opt/seamware/plugins
 
     #
-    # A real AAS server for aas_basyx (the rest run on the mock): Eclipse BaSyx's AAS environment, reached as
-    # http://basyx:8081 from the job's container. Its Operation delegation goes to the test's delegate in the
-    # job's container - a private address, which BaSyx refuses unless told otherwise
+    # A real AAS server for aas_basyx and aas_basyx_push (the rest run on the mock, FA³ST runs in the job - below):
+    # Eclipse BaSyx's AAS environment, reached as http://basyx:8081 from the job's container. Its Operation
+    # delegation goes to the test's delegate in the job's container - a private address, which BaSyx refuses
+    # unless told otherwise. Its events (the mqtt feature) go to the MQTT broker "mqtt": eclipse-mosquitto 1.6,
+    # anonymous on every interface with no configuration (a service gets no file). BaSyx connects at its start
+    # and does not start without the broker: the broker first, and BaSyx restarted should it start before it
     #
     services:
+      mqtt:
+        image: eclipse-mosquitto:1.6
       basyx:
         image: eclipsebasyx/aas-environment:2.0.0-milestone-16
+        options: --restart on-failure:10
         env:
           BASYX_SUBMODELREPOSITORY_FEATURE_OPERATION_DELEGATION_SECURITY_DENYPRIVATETARGETS: "false"
-      # A second real AAS server for aas_faaast: FA³ST Service, its defaults - https with a self-signed
-      # certificate of its own, on 443, the API under /api/v3.0 - but for SNI: its certificate is made for
-      # localhost, the job reaches it as "faaast", and with SNI on FA³ST answers that "400: Invalid SNI"
-      faaast:
-        image: fraunhoferiosb/faaast-service:1.3.0
-        env:
-          faaast_config_extension_endpoints[0].sniEnabled: "false"
+          BASYX_FEATURE_MQTT_ENABLED: "true"
+          MQTT_CLIENTID: aas-test-basyx
+          MQTT_HOSTNAME: mqtt
+          MQTT_PORT: "1883"
 
     steps:
       - name: The openssl tool - the test makes the mock server's certificate
@@ -90,6 +93,26 @@ jobs:
           mkdir -p /opt/seamware/plugins /opt/seamware/etc
           make di
 
+      #
+      # FA³ST Service for aas_faaast and aas_faaast_push: its release's starter jar, run by the test in the job
+      # (corTest's -faaast, $AAS_FAAAST_JAR) - FA³ST takes its MQTT message bus from a configuration file only
+      # (not from its environment), and a service gets no file
+      #
+      - name: FA³ST's starter jar, cached
+        uses: actions/cache@v4
+        with:
+          path: ~/faaast
+          key: faaast-starter-1.3.0
+
+      - name: FA³ST - java, its starter jar
+        run: |
+          apt-get update -qq && apt-get install -y -qq --no-install-recommends openjdk-17-jre-headless > /dev/null
+          mkdir -p ~/faaast
+          [ -s ~/faaast/starter-1.3.0.jar ] || curl -sfL -o ~/faaast/starter-1.3.0.jar \
+            https://github.com/FraunhoferIOSB/FAAAST-Service/releases/download/v1.3.0/starter-1.3.0.jar
+          ls -la ~/faaast/starter-1.3.0.jar
+          java -version
+
       - name: Functional tests
         working-directory: stack/bridge
         #
@@ -99,8 +122,8 @@ jobs:
         env:
           CORJSON: ${{ github.workspace }}/stack/corJson/bin/corJson
           AAS_BASYX_URL: http://basyx:8081
-          AAS_FAAAST_URL: https://faaast:443/api/v3.0
-        run: make test CORTEST=../corLibs/bin/corTest
+          AAS_BASYX_MQTT_URL: mqtt://mqtt:1883
+        run: AAS_FAAAST_JAR=$HOME/faaast/starter-1.3.0.jar make test CORTEST=../corLibs/bin/corTest
 
       - name: Keep what a failing test left
         if: failure()

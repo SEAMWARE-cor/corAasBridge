@@ -47,6 +47,15 @@ extern int aasBridgeOpen(const AasTarget* targetP, AasTarget* registryP, const c
 
 // -----------------------------------------------------------------------------
 //
+// aasSubmodelChanged - an event about submodel id (aasPush): each AssetChannel with a leaf of it read at once;
+// how many
+//
+extern int aasSubmodelChanged(const char* id);
+
+
+
+// -----------------------------------------------------------------------------
+//
 // aasBridgeClose - the threads stopped and joined: none calls the broker after it returns
 //
 extern void aasBridgeClose(void);

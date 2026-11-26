@@ -115,6 +115,10 @@ mockStart() {
         opts+=("$1" "$2")
         shift
         ;;
+      --push)                                         # basyx|faaast: changes published to mqttStart's broker
+        opts+=(--push "$2" --mqtt-port "$AAS_MQTT_PORT")
+        shift
+        ;;
       --values-as-text|--log-requests)
         opts+=("$1")
         ;;
@@ -135,6 +139,54 @@ mockStart() {
   echo "mockStart: no answer on port $AAS_MOCK_PORT - $AAS_TEST_DIR/mock.log:" >&2
   tail -20 "$AAS_TEST_DIR/mock.log" >&2
   return 1
+}
+
+
+# -----------------------------------------------------------------------------
+#
+# mqttStart - an MQTT broker on localhost:$AAS_MQTT_PORT (mosquitto, verbose: its log has each SUBSCRIBE), for
+# push; mqttStop. mqttSubscribed <topic> [secs] - wait until a client has subscribed to <topic> at it
+#
+AAS_MQTT_PORT="${AAS_MQTT_PORT:-18883}"
+mqttStart() {
+  mqttStop
+  mosquitto -v -p "$AAS_MQTT_PORT" > "$AAS_TEST_DIR/mqtt.log" 2>&1 &
+  echo $! > "$AAS_TEST_DIR/mqtt.pid"
+
+  local i
+  for ((i = 0; i < 50; i++)); do
+    (echo > "/dev/tcp/127.0.0.1/$AAS_MQTT_PORT") 2>/dev/null && return 0
+    sleep 0.1
+  done
+
+  echo "mqttStart: no answer on port $AAS_MQTT_PORT - $AAS_TEST_DIR/mqtt.log:" >&2
+  tail -20 "$AAS_TEST_DIR/mqtt.log" >&2
+  return 1
+}
+
+mqttSubscribed() {
+  local secs="${2:-10}" i
+
+  for ((i = 0; i < secs * 10; i++)); do
+    grep -qF -- "	$1 (QoS" "$AAS_TEST_DIR/mqtt.log" && return 0
+    sleep 0.1
+  done
+
+  echo "mqttSubscribed: no client subscribed to '$1' after ${secs}s - $AAS_TEST_DIR/mqtt.log" >&2
+  return 1
+}
+
+mqttStop() {
+  local pidFile="$AAS_TEST_DIR/mqtt.pid" pid i
+  [ -f "$pidFile" ] || return 0
+
+  pid=$(cat "$pidFile")
+  kill "$pid" 2>/dev/null
+  for ((i = 0; i < 50; i++)); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  rm -f "$pidFile"
 }
 
 

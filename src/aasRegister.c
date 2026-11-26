@@ -47,6 +47,7 @@
 
 #include "aasHttp.h"                                  // AasTarget, AasTls, aasTargetInit, aasOauth2*, aasHttpVersion
 #include "aasBridge.h"                                // aasBridge*, aasEndpoint*, aasPublish, ...
+#include "aasPush.h"                                  // aasPushStart, aasPushStop
 
 
 
@@ -113,6 +114,7 @@ static const char* stringOf(CorNode* objectP, const char* name)
 //   { "aas": { "server": { "url": "https://aas.acme.example/api/v3.0", "authorizationEnv": "AAS_AUTHORIZATION",
 //                          "caFile": "/etc/aas/ca.pem" },
 //              "registry": { "url": "https://registry.acme.example/api/v3.0" },
+//              "push": { "url": "mqtt://mqtt.acme.example:1883" },
 //              "ngsild": { "assetChannels": { "<shell id>": { "entities": "natural", ... } } } } }
 //
 // "authorizationEnv" names the environment variable that holds the Authorization header's value ("Bearer ...")
@@ -123,7 +125,8 @@ static const char* stringOf(CorNode* objectP, const char* name)
 // certificate, for a server that asks for one (mutual TLS) - the token endpoint is reached with the same.
 // "registry": an AAS registry (IDTA-01002's /shell-descriptors) - where a shell and its submodels are read
 // from. The credentials and the certificate go only to server.url's host (scheme, host and port): to the
-// registry, and to a server it names, only if it is that host.
+// registry, and to a server it names, only if it is that host. "push": the MQTT broker the server publishes its
+// change events to (BaSyx's, FA³ST's) - each event about a submodel makes its AssetChannels read at once.
 //
 static int aasInit(const char* configFile, const BridgeBroker* brokerP)
 {
@@ -138,6 +141,7 @@ static int aasInit(const char* configFile, const BridgeBroker* brokerP)
   AasTls      tls      = { NULL, false, NULL, NULL };
   AasTarget   target;
   AasTarget*  registryP = NULL;
+  const char* pushUrl   = NULL;
 
   corAllocBufferInit(&ka, buf, sizeof(buf), 16 * 1024, NULL, "aas config");
   corJsonCreate(&cj, &ka);
@@ -204,6 +208,10 @@ static int aasInit(const char* configFile, const BridgeBroker* brokerP)
     }
 
     CorNode* registryNodeP = corTreeLookup(aasP, "registry");
+    CorNode* pushNodeP     = corTreeLookup(aasP, "push");
+
+    if ((why == NULL) && (pushNodeP != NULL) && (((pushNodeP->type != CorObject) || ((pushUrl = stringOf(pushNodeP, "url")) == NULL))))
+      why = "push - { \"url\": \"mqtt://<host>[:<port>]\" }, the MQTT broker the AAS server publishes its events to";
 
     if ((why == NULL) && (registryNodeP != NULL))
     {
@@ -227,6 +235,11 @@ static int aasInit(const char* configFile, const BridgeBroker* brokerP)
     {
       aasTargetRelease(&target);
       why = "the plugin's threads could not be started";
+    }
+    else if (pushUrl != NULL)
+    {
+      if ((why = aasPushStart(pushUrl)) != NULL)
+        aasBridgeClose();
     }
   }
 
@@ -256,6 +269,7 @@ static int aasInit(const char* configFile, const BridgeBroker* brokerP)
 //
 static void aasClose(void)
 {
+  aasPushStop();                                      // no event after: it reads the bridge's endpoints
   aasBridgeClose();
   aasTargetsRelease();
   aasOauth2Release();

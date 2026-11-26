@@ -38,6 +38,12 @@
 #   POST /test/revoke   {}                                every token given so far no longer valid
 #   POST /test/descriptor { "id", "descriptor" }          the registry's descriptor of shell id (null: none)
 #
+# With --push basyx|faaast and --mqtt-port <p>, a change at the source (/test/set) is also published to the MQTT
+# broker on localhost:<p>, as that server publishes it - Eclipse BaSyx (its mqtt feature):
+# sm-repository/sm-repo/submodels/<id, base64url, no padding>/submodelElements/<idShortPath>/value/updated, the
+# element; FA³ST Service (MessageBusMqtt): events/ValueChangeEventMessage, { "@type": "ValueChangeEvent",
+# "element": { "keys": [ Submodel, the element ] }, "oldValue", "newValue" }. Each one logged, "published <topic>".
+#
 # Each PATCH, PUT and invocation is logged, one line, to the file --log names:
 # "PATCH <submodel idShort>.<idShortPath> <body>", "PUT <submodel idShort>.<idShortPath> <the items' values>" (a
 # list, PutSubmodelElementByPath), "invoke <submodel idShort>.<idShortPath> <arguments>". With --log-requests,
@@ -50,6 +56,7 @@
 import argparse
 import base64
 import json
+import socket
 import ssl
 import threading
 import time
@@ -180,6 +187,43 @@ lock  = threading.Lock()
 tokens = {}                                    # "tok-<n>": when it expires
 speed = [0.0]
 args  = None
+
+
+def mqttPublish(topic, payload):
+  # MQTT 3.1.1, QoS 0, by hand: CONNECT, PUBLISH, DISCONNECT (the test image has no MQTT client library)
+  def packet(kind, body):
+    n, length = len(body), b""
+    while True:
+      b, n = n % 128, n // 128
+      length += bytes([b | (0x80 if n > 0 else 0)])
+      if n == 0:
+        return bytes([kind]) + length + body
+  def string(s):
+    b = s.encode()
+    return len(b).to_bytes(2, "big") + b
+  with socket.create_connection(("127.0.0.1", args.mqtt_port), 2) as s:
+    s.sendall(packet(0x10, string("MQTT") + bytes([4, 0x02, 0, 30]) + string("aasMock")))
+    s.recv(4)                                                        # CONNACK
+    s.sendall(packet(0x30, string(topic) + json.dumps(payload).encode()))
+    s.sendall(packet(0xE0, b""))
+
+
+def pushChange(sm, path, e, old):
+  if args.push == "basyx":
+    b64 = base64.urlsafe_b64encode(sm["id"].encode()).decode().rstrip("=")
+    topic = "sm-repository/sm-repo/submodels/%s/submodelElements/%s/value/updated" % (b64, path)
+    payload = e
+  else:
+    keys = [{"type": "Submodel", "value": sm["id"]}] + [{"type": "SubmodelElement", "value": path}]
+    topic = "events/ValueChangeEventMessage"
+    payload = {"@type": "ValueChangeEvent", "element": {"type": "ModelReference", "keys": keys},
+               "oldValue": {"modelType": "Property", "dataType": e.get("valueType"), "value": old},
+               "newValue": {"modelType": "Property", "dataType": e.get("valueType"), "value": e.get("value")}}
+  try:
+    mqttPublish(topic, payload)
+    return "published " + topic
+  except OSError as x:
+    return "not published %s: %s" % (topic, x)
 
 
 def b64decode(s):
@@ -487,7 +531,10 @@ class Handler(BaseHTTPRequestHandler):
       with lock:
         sm = byId(SUBMODELS, req["submodel"])
         if p == ["test", "set"]:
-          element(sm, req["path"])["value"] = req["value"]
+          e = element(sm, req["path"])
+          old, e["value"] = e.get("value"), req["value"]
+          if args.push is not None:
+            self.logLine(pushChange(sm, req["path"], e, old))
         elif p == ["test", "add"]:
           sm["submodelElements"].append(req["element"])
         elif p == ["test", "remove"]:
@@ -524,6 +571,8 @@ def main():
   p.add_argument("--oauth2")
   p.add_argument("--token-life", type=int, default=60)
   p.add_argument("--log-requests", action="store_true")
+  p.add_argument("--push", choices=["basyx", "faaast"])
+  p.add_argument("--mqtt-port", type=int, default=1883)
   args = p.parse_args()
 
   server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)

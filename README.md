@@ -179,6 +179,19 @@ gets the request without them, verified against `caFile` (or `insecure`) all the
          "registry": { "url": "https://aas.acme.example/registry/api/v3.0" }, "ngsild": { ... } }
 ```
 
+**Push.** With `"push": { "url": "mqtt://<host>[:<port>]" }` (a member of `aas`; port 1883 by default), the
+plugin subscribes to the change events the AAS server publishes to that MQTT broker. An event about a submodel
+makes every AssetChannel with an element of it read at once, instead of at its next poll; the read hands the
+values over as a poll does. Polling goes on: an event missed, or the broker not reachable, costs at most a
+`pollInterval` (the log says when the connection is lost, once; it is retried, 1 s to 30 s). Two servers' events:
+
+| server | its events | the server's setting (checked against the server, 2026-11-26) |
+|---|---|---|
+| Eclipse BaSyx | `sm-repository/<repo>/submodels/<id, base64url>/submodelElements/<idShortPath>/value/updated`, `.../updated`, `.../created`, ...; `sm-repository/<repo>/submodels/{created,updated}` (the submodel in the payload) | `BASYX_FEATURE_MQTT_ENABLED=true`, `MQTT_HOSTNAME`, `MQTT_PORT`, `MQTT_CLIENTID` - an external broker |
+| FA³ST Service | `events/<Event>Message` (`ValueChangeEventMessage`, `ElementCreateEventMessage`, ...), the submodel the first key of the payload's `element` | `"messageBus": { "@class": "de.fraunhofer.iosb.ilt.faaast.service.messagebus.mqtt.MessageBusMqtt", "host": "0.0.0.0", "port": 1883, "useInternalServer": true }` - its own broker (`host`: it listens on 127.0.0.1 only otherwise), or an external one |
+
+No credentials and no TLS to the MQTT broker yet: `mqtt://` only.
+
 ## Build and test
 
     make && make test          # libssl-dev; the tests run python3 and the openssl tool
@@ -200,7 +213,8 @@ certificate made by the test, and an Authorization header; `--values-as-text` ma
 booleans as strings only, as BaSyx does; `--oauth2` makes it a token endpoint too, `--client-ca` takes only a client
 with a certificate (`aas_oauth2`, `aas_mtls`). It is a registry too (`/registry/shell-descriptors`, the descriptors the
 test gives), and many servers by base path (`/srv-<x>/...`); `--log-requests` logs each request's host and whether
-credentials came with it (`aas_registry`).
+credentials came with it (`aas_registry`). With `--push basyx|faaast` it publishes a change at the source as
+that server does, to the mosquitto the test starts (`aas_push`).
 
 The broker must have AssetChannels; write-back (`COR_FEATURE_CHANNEL_WRITE_BACK`) for `"both"`, and Service
 Execution for the Operations.

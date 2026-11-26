@@ -1,0 +1,149 @@
+#
+# FILE            aas_relationship.test
+#
+# Copyright 2026 Seamware
+# SPDX-License-Identifier: Apache-2.0
+#
+# RelationshipElements (coraine's doc/aas.md, section 5): a Relationship on the entity 'first' is or is in, named
+# by the element's idShort, to what 'second' refers to - resolved as a ReferenceElement's target: an entity, of
+# this AssetChannel or of another one; an element in an entity, that entity and a targetNode; anything else, a
+# Property. The mock's shell line-3, its submodel Layout (Speed, a collection Infeed with Rate), its
+# RelationshipElements:
+#
+#   Feeds       Layout                  -> the press-17 shell               another AssetChannel's entity
+#   Drives      Layout#Speed            -> press-17's Operational#Pressure  an element in another AssetChannel's entity
+#   LimitedBy   Layout#Infeed.Rate      -> Layout#Speed                     an element of its own entity
+#   LocatedIn   the line-3 shell        -> https://sites.example/hall-2     an external reference: a Property
+#   Supplies    press-17's Nameplate    -> the line-3 shell                 'first' not in line-3's model: not mapped
+#   Dangling    Layout                  -> (no second)                      not mapped
+#
+# Both shells AssetChannels, entities natural.
+#
+# REQUIRE_FEATURE: ASSET_CHANNELS
+#
+--NAME--
+aas bridge - a RelationshipElement a Relationship on the entity its first is or is in, to its second
+
+--TAGS--
+bridge aas
+
+--INIT--
+rm -rf "${AAS_TEST_DIR:?}"
+mkdir -p "$AAS_TEST_DIR"
+cat > $AAS_TEST_DIR/bridges.json <<J
+{ "aas": { "server": { "url": "http://localhost:$AAS_MOCK_PORT" },
+           "ngsild": { "defaultEntity": false, "assetChannels": {
+             "https://acme.example/ids/aas/press-17": { "entities": "natural" },
+             "https://acme.example/ids/aas/line-3":   { "entities": "natural" } } } } }
+J
+mockStart
+brokerStart --apiPlugins admin
+
+--RUN--
+LAYOUT=https://acme.example/ids/sm/line-3/layout
+entityAwait $LAYOUT drives press-17/operational
+
+echo "01. Layout - Feeds, Drives (from Speed, a node in it), LimitedBy (from Infeed.Rate, a node in it); not Supplies, not Dangling"
+echo "========================================================================================================================="
+entityGet $LAYOUT speed,feeds,drives,limitedBy,supplies,dangling
+echo
+echo
+
+
+echo "02. The line-3 shell - LocatedIn, an external reference: a Property"
+echo "==================================================================="
+entityGet https://acme.example/ids/aas/line-3 locatedIn
+echo
+echo
+
+
+echo "03. The broker's log - Supplies not mapped"
+echo "=========================================="
+grep -o "aas: '[^']*': RelationshipElement .*" "$AAS_TEST_DIR/broker.log" | sort -u
+echo
+echo
+
+
+echo "04. The inventory from line-3 - each node's references"
+echo "======================================================"
+curl -s "localhost:$AAS_PORT/admin/bridges/aas/inventory?from=$(urlEncode https://acme.example/ids/aas/line-3)" | python3 -c 'import sys, json
+def walk(n, depth):
+    print("  " * depth + n["node"], n.get("name", "-"), n.get("id", "-"))
+    for r in n.get("references", []):
+        print("  " * depth + "  reference", r["type"], r["target"])
+    for c in n.get("children", []):
+        walk(c, depth + 1)
+walk(json.load(sys.stdin), 0)'
+echo
+echo
+
+
+--TEARDOWN--
+brokerStop
+mockStop
+rm -f "${AAS_TEST_DIR:?}/bridges.json"
+
+--EXPECT--
+01. Layout - Feeds, Drives (from Speed, a node in it), LimitedBy (from Infeed.Rate, a node in it); not Supplies, not Dangling
+=========================================================================================================================
+{
+  "drives": {
+    "object": "https://acme.example/ids/sm/press-17/operational",
+    "targetNode": {
+      "type": "Property",
+      "value": "https://acme.example/ids/sm/press-17/operational#Pressure"
+    },
+    "type": "Relationship"
+  },
+  "feeds": {
+    "object": "https://acme.example/ids/aas/press-17",
+    "type": "Relationship"
+  },
+  "id": "https://acme.example/ids/sm/line-3/layout",
+  "limitedBy": {
+    "object": "https://acme.example/ids/sm/line-3/layout",
+    "targetNode": {
+      "type": "Property",
+      "value": "https://acme.example/ids/sm/line-3/layout#Speed"
+    },
+    "type": "Relationship"
+  },
+  "speed": {
+    "type": "Property",
+    "value": 1.2
+  },
+  "type": "Layout"
+}
+
+
+02. The line-3 shell - LocatedIn, an external reference: a Property
+===================================================================
+{
+  "id": "https://acme.example/ids/aas/line-3",
+  "locatedIn": {
+    "type": "Property",
+    "value": "https://sites.example/hall-2"
+  },
+  "type": "Shell"
+}
+
+
+03. The broker's log - Supplies not mapped
+==========================================
+aas: 'https://acme.example/ids/aas/line-3': RelationshipElement 'Supplies' - its first, 'https://acme.example/ids/sm/press-17/nameplate', is not in the model: not mapped
+
+
+04. The inventory from line-3 - each node's references
+======================================================
+shell Line3 https://acme.example/ids/aas/line-3
+  reference LocatedIn https://sites.example/hall-2
+  property assetKind https://acme.example/ids/aas/line-3#assetKind
+  submodel Layout https://acme.example/ids/sm/line-3/layout
+    reference Feeds https://acme.example/ids/aas/press-17
+    property Speed https://acme.example/ids/sm/line-3/layout#Speed
+      reference Drives https://acme.example/ids/sm/press-17/operational#Pressure
+    collection Infeed https://acme.example/ids/sm/line-3/layout#Infeed
+      property Rate https://acme.example/ids/sm/line-3/layout#Infeed.Rate
+        reference LimitedBy https://acme.example/ids/sm/line-3/layout#Speed
+
+

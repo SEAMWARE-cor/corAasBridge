@@ -24,12 +24,15 @@
 //   ReferenceElement            a reference of the node it is in: { "type": idShort, "target" }, the target the
 //                               id of the node it refers to - a shell's or a submodel's id, an element's
 //                               "<submodel id>#<idShortPath>" - or, for an external reference, its key's value
+//   RelationshipElement         a reference of the node its "first" names (the shell, a submodel, an element):
+//                               { "type": idShort, "target" }, the target what its "second" refers to, as a
+//                               ReferenceElement's; a "first" not in the model read: nothing (logged)
 //   SubmodelElementCollection   { "node": "collection", "id", "name": idShort, "children" }
 //   SubmodelElementList         of values: a leaf, "attributeType": "ListProperty", the values; of references: a
 //                               reference each (a ListRelationship); of anything else: a collection, its items
 //                               named by their index
 //   Operation                   { "node": "operation", "id", "name", "input", "output" } - a service (aasService.h)
-//   Entity, RelationshipElement, AnnotatedRelationshipElement, Capability, BasicEventElement: not mapped
+//   Entity, AnnotatedRelationshipElement, Capability, BasicEventElement: not mapped
 //
 // A leaf's and a collection's "id" is "<submodel id>#<idShortPath>" (Unit.Pressure, Stations[1]): what a
 // value change, a client's write back and a reference name.

@@ -277,6 +277,13 @@ https://acme.example/ids/aas/press-17 available - in valuesIn=0 valuesOut=-
       "submodels": [
         "https://acme.example/ids/sm/none"
       ]
+    },
+    {
+      "id": "https://acme.example/ids/aas/line-3",
+      "idShort": "Line3",
+      "submodels": [
+        "https://acme.example/ids/sm/line-3/layout"
+      ]
     }
   ],
   "submodels": [
@@ -288,6 +295,10 @@ https://acme.example/ids/aas/press-17 available - in valuesIn=0 valuesOut=-
     {
       "id": "https://acme.example/ids/sm/press-17/operational",
       "idShort": "OperationalData"
+    },
+    {
+      "id": "https://acme.example/ids/sm/line-3/layout",
+      "idShort": "Layout"
     }
   ]
 }

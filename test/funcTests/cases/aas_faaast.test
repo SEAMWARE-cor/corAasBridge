@@ -1,0 +1,269 @@
+#
+# FILE            aas_faaast.test
+#
+# Copyright 2026 Seamware
+# SPDX-License-Identifier: Apache-2.0
+#
+# The bridge against a second real AAS server, FA³ST Service 1.3 (Fraunhofer IOSB; corTest's -faaast: started in
+# docker, or CI's service) - with its defaults: https with a certificate of its own (self-signed: insecure), the
+# API under /api/v3.0. The same shell and submodel as aas_basyx, POSTed to FA³ST's API, an AssetChannel on the
+# shell (natural, both, polled every 0.5 s).
+#
+# What it shows:
+#   - the model read: the two entities, every element converted by its valueType;
+#   - a write of a number and a boolean: FA³ST takes them as JSON numbers and booleans, as IDTA-01001's ValueOnly
+#     has them - the first form the bridge sends, no fallback to strings;
+#   - a LanguageProperty written in its ValueOnly form;
+#   - a change made at FA³ST comes in with the next poll;
+#   - the Operation registered as a service of the submodel's entity, its invocation sent to FA³ST's /invoke:
+#     FA³ST runs an Operation only through an asset connection of its configuration, and has none here - it
+#     answers 500, the client 502 with FA³ST's reason;
+#   - a write to a list of any element (SubmodelElement): FA³ST cannot read its ValueOnly form (500) - the
+#     element is read back, the entity keeps what FA³ST has.
+#
+# REQUIRE_FEATURE: ASSET_CHANNELS
+# REQUIRE_FEATURE: CHANNEL_WRITE_BACK
+# REQUIRE_FEATURE: SERVICE_EXECUTION
+# SKIP_FAAAST: off
+#
+--NAME--
+aas bridge - against FA³ST Service: read, polled, written back, an Operation sent to /invoke
+
+--TAGS--
+bridge aas faaast
+
+--INIT--
+rm -rf "${AAS_TEST_DIR:?}"
+mkdir -p "$AAS_TEST_DIR"
+faaastStart || exit 1
+
+SHELL_ID=https://acme.example/ids/aas/press-19
+SM_ID=https://acme.example/ids/sm/press-19/operational
+faaastDelete shells "$SHELL_ID" > /dev/null
+faaastDelete submodels "$SM_ID" > /dev/null
+
+faaastPost submodels '{"modelType": "Submodel", "id": "'$SM_ID'", "idShort": "Operational", "submodelElements": [
+  {"modelType": "Property", "idShort": "Speed", "valueType": "xs:double", "value": "1.5"},
+  {"modelType": "Property", "idShort": "Count", "valueType": "xs:int", "value": "7"},
+  {"modelType": "Property", "idShort": "Running", "valueType": "xs:boolean", "value": "true"},
+  {"modelType": "MultiLanguageProperty", "idShort": "Name", "value": [{"language": "en", "text": "Press"}, {"language": "de", "text": "Presse"}]},
+  {"modelType": "Range", "idShort": "Limits", "valueType": "xs:double", "min": "0", "max": "400"},
+  {"modelType": "SubmodelElementList", "idShort": "Tags", "typeValueListElement": "SubmodelElement", "orderRelevant": true, "value": [
+    {"modelType": "Property", "valueType": "xs:string", "value": "hydraulic"},
+    {"modelType": "Property", "valueType": "xs:string", "value": "line-2"}]},
+  {"modelType": "ReferenceElement", "idShort": "Manual", "value": {"type": "ModelReference", "keys": [{"type": "Submodel", "value": "'$SM_ID'"}]}},
+  {"modelType": "Operation", "idShort": "Scale",
+   "inputVariables": [{"value": {"modelType": "Property", "idShort": "Factor", "valueType": "xs:double"}}],
+   "outputVariables": [{"value": {"modelType": "Property", "idShort": "Result", "valueType": "xs:double"}}]}]}' > /dev/null
+faaastPost shells '{"modelType": "AssetAdministrationShell", "id": "'$SHELL_ID'", "idShort": "Press19",
+  "assetInformation": {"assetKind": "Instance", "globalAssetId": "https://acme.example/assets/press-19"},
+  "submodels": [{"type": "ModelReference", "keys": [{"type": "Submodel", "value": "'$SM_ID'"}]}]}' > /dev/null
+
+cat > $AAS_TEST_DIR/bridges.json <<J
+{ "aas": { "server": { "url": "$AAS_FAAAST_URL", "insecure": true },
+           "ngsild": { "defaultEntity": false, "assetChannels": {
+             "$SHELL_ID": { "entities": "natural", "channelDirection": "both",
+                            "channelInfo": [ { "key": "pollInterval", "value": "PT0.5S" } ] } } } } }
+J
+brokerStart
+
+--RUN--
+faaastEnv
+SM_ID=https://acme.example/ids/sm/press-19/operational
+SM="$AAS_FAAAST_URL/submodels/$(b64url $SM_ID)/submodel-elements"
+B="http://localhost:$AAS_PORT/ngsi-ld/v1"
+faaastValue() {  # faaastValue <idShortPath> - FA³ST's $value of an element, { "<idShort>": value }, compact
+  curl -sk "$SM/$1/\$value" | python3 -c 'import sys, json; print(json.dumps(json.load(sys.stdin), sort_keys=True))'
+}
+entityAwait $SM_ID speed 1.5 30
+
+echo "01. The two entities - every element converted by its valueType, the list a ListProperty"
+echo "=========================================================================================="
+curl -s "$B/entities?type=Shell,Operational" | python3 -c 'import sys, json
+print(json.dumps(sorted(json.load(sys.stdin), key=lambda e: e["id"]), indent=2, sort_keys=True))'
+echo
+echo
+
+
+echo "02. PATCH count 8, running false - FA³ST takes the JSON number and boolean, no fallback to strings"
+echo "================================================================================================="
+attrPatch $SM_ID count '{"value": 8}'
+attrPatch $SM_ID running '{"value": false}'
+for i in $(seq 1 50); do faaastValue Running | grep -q false && break; sleep 0.1; done
+faaastValue Count
+faaastValue Running
+grep -c 'the server takes numbers and booleans as strings only' "$AAS_TEST_DIR/broker.log"
+echo
+echo
+
+
+echo "03. PATCH name - a LanguageProperty, the MLP's ValueOnly form; FA³ST has it"
+echo "==========================================================================="
+attrPatch $SM_ID name '{"type": "LanguageProperty", "languageMap": {"en": "Press 19", "de": "Presse 19"}}'
+for i in $(seq 1 50); do faaastValue Name | grep -q 'Press 19' && break; sleep 0.1; done
+faaastValue Name
+echo
+echo
+
+
+echo "04. Speed changed at FA³ST - the entity follows with the next poll"
+echo "=================================================================="
+curl -sk -o /dev/null -w "%{http_code}\n" -X PATCH "$SM/Speed/\$value" -H 'Content-Type: application/json' -d '2.25'
+entityAwait $SM_ID speed 2.25
+entityGet $SM_ID speed,count,running,name,limits keyValues
+echo
+echo
+
+
+echo "05. Scale - registered as a service of the submodel's entity; FA³ST has no asset connection to run it: 502"
+echo "=========================================================================================================="
+curl -s "$B/serviceRegistrations" | python3 -c 'import sys, json
+for r in json.load(sys.stdin):
+  print(r["serviceInformation"]["serviceName"], r["entities"][0]["id"], json.dumps(r["serviceInformation"].get("inputSchema"), sort_keys=True))'
+curl -s -o "$AAS_TEST_DIR/invoke.out" -w "%{http_code}\n" "$B/entities/$(urlEncode $SM_ID)/services/Scale" -H 'Content-Type: application/json' -d '{"Factor": 21}'
+python3 -c 'import sys, json; e = json.load(open(sys.argv[1])); print(e["title"]); print("no operation provider" in e["detail"])' "$AAS_TEST_DIR/invoke.out"
+echo
+echo
+
+
+echo "06. PATCH tags - FA³ST cannot read a list of any element's ValueOnly form (500): read back, the entity keeps FA³ST's"
+echo "===================================================================================================================="
+attrPatch $SM_ID tags '{"type": "ListProperty", "valueList": ["hydraulic", "line-3"]}'
+for i in $(seq 1 50); do grep -q 'Tags/\$value.*: 500' "$AAS_TEST_DIR/broker.log" && break; sleep 0.1; done
+grep -o 'Tags/\$value \["hydraulic","line-3"\]: 500' "$AAS_TEST_DIR/broker.log"
+entityAwait $SM_ID tags line-2
+entityGet $SM_ID tags keyValues
+echo
+echo
+
+
+--TEARDOWN--
+brokerStop
+faaastDelete shells https://acme.example/ids/aas/press-19 > /dev/null 2>&1
+faaastDelete submodels https://acme.example/ids/sm/press-19/operational > /dev/null 2>&1
+faaastStop
+rm -f "${AAS_TEST_DIR:?}/bridges.json"
+
+--EXPECT--
+01. The two entities - every element converted by its valueType, the list a ListProperty
+==========================================================================================
+[
+  {
+    "assetKind": {
+      "type": "Property",
+      "value": "Instance"
+    },
+    "globalAssetId": {
+      "type": "Property",
+      "value": "https://acme.example/assets/press-19"
+    },
+    "id": "https://acme.example/ids/aas/press-19",
+    "operational": {
+      "object": "https://acme.example/ids/sm/press-19/operational",
+      "type": "Relationship"
+    },
+    "type": "Shell"
+  },
+  {
+    "count": {
+      "type": "Property",
+      "value": 7
+    },
+    "id": "https://acme.example/ids/sm/press-19/operational",
+    "limits": {
+      "type": "Property",
+      "value": {
+        "max": 400,
+        "min": 0
+      }
+    },
+    "manual": {
+      "object": "https://acme.example/ids/sm/press-19/operational",
+      "type": "Relationship"
+    },
+    "name": {
+      "languageMap": {
+        "de": "Presse",
+        "en": "Press"
+      },
+      "type": "LanguageProperty"
+    },
+    "running": {
+      "type": "Property",
+      "value": true
+    },
+    "speed": {
+      "type": "Property",
+      "value": 1.5
+    },
+    "tags": {
+      "type": "ListProperty",
+      "valueList": [
+        "hydraulic",
+        "line-2"
+      ]
+    },
+    "type": "Operational"
+  }
+]
+
+
+02. PATCH count 8, running false - FA³ST takes the JSON number and boolean, no fallback to strings
+=================================================================================================
+204
+204
+{"Count": 8}
+{"Running": false}
+0
+
+
+03. PATCH name - a LanguageProperty, the MLP's ValueOnly form; FA³ST has it
+===========================================================================
+204
+{"Name": [{"en": "Press 19"}, {"de": "Presse 19"}]}
+
+
+04. Speed changed at FA³ST - the entity follows with the next poll
+==================================================================
+204
+{
+  "count": 8,
+  "id": "https://acme.example/ids/sm/press-19/operational",
+  "limits": {
+    "max": 400,
+    "min": 0
+  },
+  "name": {
+    "languageMap": {
+      "de": "Presse 19",
+      "en": "Press 19"
+    }
+  },
+  "running": false,
+  "speed": 2.25,
+  "type": "Operational"
+}
+
+
+05. Scale - registered as a service of the submodel's entity; FA³ST has no asset connection to run it: 502
+==========================================================================================================
+Scale https://acme.example/ids/sm/press-19/operational {"additionalProperties": false, "properties": {"Factor": {"type": "number"}}, "required": ["Factor"], "type": "object"}
+502
+The AAS operation failed
+True
+
+
+06. PATCH tags - FA³ST cannot read a list of any element's ValueOnly form (500): read back, the entity keeps FA³ST's
+====================================================================================================================
+204
+Tags/$value ["hydraulic","line-3"]: 500
+{
+  "id": "https://acme.example/ids/sm/press-19/operational",
+  "tags": [
+    "hydraulic",
+    "line-2"
+  ],
+  "type": "Operational"
+}
+
+

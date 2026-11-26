@@ -381,6 +381,62 @@ basyxPost() {
 
 # -----------------------------------------------------------------------------
 #
+# faaastEnv / faaastStart / faaastStop / faaastPost - FA³ST Service, as basyx*: AAS_FAAAST a URL (left running) or
+# an image, started on 127.0.0.1:$AAS_FAAAST_PORT with its defaults - https (a certificate of its own, self-signed),
+# the API under /api/v3.0, an empty model. AAS_FAAAST_URL: where its API is
+#
+AAS_FAAAST_PORT="${AAS_FAAAST_PORT:-18084}"
+
+faaastEnv() {
+  case "$AAS_FAAAST" in
+    http://*|https://*) AAS_FAAAST_URL="$AAS_FAAAST" ;;
+    *)                  AAS_FAAAST_URL="https://localhost:$AAS_FAAAST_PORT/api/v3.0" ;;
+  esac
+  export AAS_FAAAST_URL
+}
+
+faaastStart() {
+  faaastEnv
+  case "$AAS_FAAAST" in
+    http://*|https://*) ;;
+    *)
+      docker rm -f aas-test-faaast > /dev/null 2>&1
+      docker run -d --rm --name aas-test-faaast -p "127.0.0.1:$AAS_FAAAST_PORT:443" "$AAS_FAAAST" \
+             > "$AAS_TEST_DIR/faaast.id" 2>&1 || { cat "$AAS_TEST_DIR/faaast.id" >&2; return 1; }
+      ;;
+  esac
+
+  local i
+  for ((i = 0; i < 120; i++)); do
+    curl -skf -o /dev/null "$AAS_FAAAST_URL/shells" && return 0
+    sleep 0.5
+  done
+
+  echo "faaastStart: no answer from $AAS_FAAAST_URL after 60s" >&2
+  return 1
+}
+
+faaastStop() {
+  case "$AAS_FAAAST" in
+    http://*|https://*) ;;
+    *) docker rm -f aas-test-faaast > /dev/null 2>&1 ;;
+  esac
+  return 0
+}
+
+faaastDelete() {
+  faaastEnv
+  curl -sk -o /dev/null -w "%{http_code}\n" -X DELETE "$AAS_FAAAST_URL/$1/$(b64url "$2")"
+}
+
+faaastPost() {
+  faaastEnv
+  curl -sk -o "$AAS_TEST_DIR/faaast.out" -w "%{http_code}\n" -X POST "$AAS_FAAAST_URL/$1" -H 'Content-Type: application/json' -d "$2"
+}
+
+
+# -----------------------------------------------------------------------------
+#
 # b64url <id> - base64url, no padding: an AAS id in a path
 #
 b64url() {

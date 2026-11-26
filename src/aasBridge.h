@@ -38,9 +38,10 @@
 // -----------------------------------------------------------------------------
 //
 // aasBridgeOpen - the threads started: the poller's, the writer's and the invoker's. target is copied;
-// authorization, caFile and insecure are kept for an Operation on another server than target's
+// authorization and the TLS settings are kept for an Operation's own target (its credentials only on
+// target's server)
 //
-extern int aasBridgeOpen(const AasTarget* targetP, const char* authorization, const char* caFile, bool insecure, const BridgeBroker* brokerP);
+extern int aasBridgeOpen(const AasTarget* targetP, const char* authorization, const AasTls* tlsP, const BridgeBroker* brokerP);
 
 
 

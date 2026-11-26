@@ -30,7 +30,7 @@
 #include <stdint.h>                                   // int64_t
 #include <stdio.h>                                    // fopen, fread, fseek, ftell, snprintf
 #include <stdlib.h>                                   // malloc, free, getenv, strtod
-#include <string.h>                                   // strcmp
+#include <string.h>                                   // strcmp, strncmp
 
 #include "corLog/corLog.h"                            // COR_E, COR_W
 #include "corAlloc/CorAlloc.h"                        // CorAlloc
@@ -45,7 +45,7 @@
 #include "corBridge/BridgeDriver.h"                   // BridgeDriver, BridgeChannelKind, BridgeDirection
 #include "corBridge/BridgeBroker.h"                   // BridgeBroker, BRIDGE_*
 
-#include "aasHttp.h"                                  // AasTarget, aasTargetInit, aasHttpVersion
+#include "aasHttp.h"                                  // AasTarget, AasTls, aasTargetInit, aasOauth2*, aasHttpVersion
 #include "aasBridge.h"                                // aasBridge*, aasEndpoint*, aasPublish, ...
 
 
@@ -115,8 +115,11 @@ static const char* stringOf(CorNode* objectP, const char* name)
 //              "ngsild": { "assetChannels": { "<shell id>": { "entities": "natural", ... } } } } }
 //
 // "authorizationEnv" names the environment variable that holds the Authorization header's value ("Bearer ...")
-// - a credential is never in the file. No "caFile": the system's CA certificates; "insecure": true, the
-// server's certificate is not verified.
+// - a credential is never in the file. Or "oauth2": { "tokenUrl", "clientId", "clientSecretEnv", "scope" } -
+// an access token by the client credentials grant, the secret in the environment variable clientSecretEnv
+// names. No "caFile": the system's CA certificates; "insecure": true, the server's certificate is not
+// verified. "clientCert" (and "clientKey", unless the key is in clientCert's file): the plugin's own
+// certificate, for a server that asks for one (mutual TLS) - the token endpoint is reached with the same.
 //
 static int aasInit(const char* configFile, const BridgeBroker* brokerP)
 {
@@ -127,8 +130,8 @@ static int aasInit(const char* configFile, const BridgeBroker* brokerP)
   char*       text     = (configFile != NULL) ? configLoad(configFile) : NULL;
   const char* why      = NULL;
   const char* auth     = NULL;
-  const char* ca       = NULL;
-  bool        insecure = false;
+  bool        oauth2   = false;
+  AasTls      tls      = { NULL, false, NULL, NULL };
   AasTarget   target;
 
   corAllocBufferInit(&ka, buf, sizeof(buf), 16 * 1024, NULL, "aas config");
@@ -148,11 +151,14 @@ static int aasInit(const char* configFile, const BridgeBroker* brokerP)
   else
   {
     CorNode*    insecureP = corTreeLookup(serverP, "insecure");
+    CorNode*    oauthP    = corTreeLookup(serverP, "oauth2");
     const char* url       = stringOf(serverP, "url");
     const char* authEnv   = stringOf(serverP, "authorizationEnv");
 
-    insecure = (insecureP != NULL) && (insecureP->type == CorBoolean) && (insecureP->value.b == true);
-    ca       = stringOf(serverP, "caFile");
+    tls.insecure   = (insecureP != NULL) && (insecureP->type == CorBoolean) && (insecureP->value.b == true);
+    tls.caFile     = stringOf(serverP, "caFile");
+    tls.clientCert = stringOf(serverP, "clientCert");
+    tls.clientKey  = stringOf(serverP, "clientKey");
 
     if (authEnv != NULL)
       auth = getenv(authEnv);
@@ -161,20 +167,51 @@ static int aasInit(const char* configFile, const BridgeBroker* brokerP)
       why = "server.url - http[s]://<host>[:<port>][/<base path>], where the AAS API is";
     else if ((authEnv != NULL) && (auth == NULL))
       why = "server.authorizationEnv names an environment variable that is not set";
-    else
-      why = aasTargetInit(&target, url, auth, ca, insecure);
+    else if ((authEnv != NULL) && (oauthP != NULL))
+      why = "server.authorizationEnv and server.oauth2 - one of them";
+    else if ((tls.clientKey != NULL) && (tls.clientCert == NULL))
+      why = "server.clientKey without server.clientCert";
+    else if ((tls.clientCert != NULL) && (strncmp(url, "https://", 8) != 0))
+      why = "server.clientCert - the url is not https";
+    else if ((oauthP != NULL) && (oauthP->type != CorObject))
+      why = "server.oauth2 - { \"tokenUrl\", \"clientId\", \"clientSecretEnv\", \"scope\" }";
+    else if (oauthP != NULL)
+    {
+      const char* tokenUrl  = stringOf(oauthP, "tokenUrl");
+      const char* clientId  = stringOf(oauthP, "clientId");
+      const char* secretEnv = stringOf(oauthP, "clientSecretEnv");
+      const char* secret    = (secretEnv != NULL) ? getenv(secretEnv) : NULL;
+
+      if ((tokenUrl == NULL) || (clientId == NULL) || (secretEnv == NULL))
+        why = "server.oauth2 needs tokenUrl, clientId and clientSecretEnv";
+      else if (secret == NULL)
+        why = "server.oauth2.clientSecretEnv names an environment variable that is not set";
+      else
+        why = aasOauth2Init(tokenUrl, clientId, secret, stringOf(oauthP, "scope"), &tls);
+
+      oauth2 = (why == NULL);
+    }
+
+    if (why == NULL)
+    {
+      why = aasTargetInit(&target, url, auth, &tls);
+      target.oauth2 = oauth2;
+    }
   }
 
   if (why == NULL)
   {
     hostP = brokerP;
 
-    if (aasBridgeOpen(&target, auth, ca, insecure, brokerP) != BRIDGE_OK)
+    if (aasBridgeOpen(&target, auth, &tls, brokerP) != BRIDGE_OK)
     {
       aasTargetRelease(&target);
       why = "the plugin's threads could not be started";
     }
   }
+
+  if ((why != NULL) && (oauth2 == true))
+    aasOauth2Release();
 
   corAllocBufferReset(&ka, false);                    // nothing parsed here is kept: the bridge has copies
   free(text);
@@ -197,6 +234,7 @@ static int aasInit(const char* configFile, const BridgeBroker* brokerP)
 static void aasClose(void)
 {
   aasBridgeClose();
+  aasOauth2Release();
   hostP = NULL;
 }
 

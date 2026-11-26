@@ -18,24 +18,32 @@
 # a JSON number or boolean - as Eclipse BaSyx does (eclipse-basyx/basyx-java-server-sdk#384, #403), where
 # IDTA-01001's ValueOnly has them as JSON numbers and booleans.
 #
-# With --authorization, a request without that Authorization header is answered 401. The test's own verbs, not
-# the API's:
+# With --authorization, a request without that Authorization header is answered 401. With --oauth2 <id>:<secret>
+# the server is also an OAuth2 token endpoint, POST /token (the client credentials grant, the client's id and
+# secret as HTTP Basic): it gives "tok-<n>", valid --token-life seconds (60 by default); a request without a
+# valid one, "Bearer tok-<n>", is answered 401. Each token given is logged, "token <n> scope=<scope>", and each
+# request refused, "refused <its Authorization>". With --client-ca <pem> (and --cert), a client without a
+# certificate that CA issued is refused at the handshake.
+# The test's own verbs, not the API's:
 #
 #   POST /test/set      { "submodel", "path", "value" }   an element's value changed at the source (the AAS JSON
 #                                                          form: a Property's a string, an MLP's [ { language, text } ])
 #   POST /test/add      { "submodel", "element" }         an element added - the model's structure changes
 #   POST /test/remove   { "submodel", "idShort" }         one removed
+#   POST /test/revoke   {}                                every token given so far no longer valid
 #
 # Each PATCH and each invocation is logged, one line, to the file --log names:
 # "PATCH <submodel idShort>.<idShortPath> <body>", "invoke <submodel idShort>.<idShortPath> <arguments>".
 #
 #   aasMock.py --port <p> --log <file> [--values-as-text] [--authorization <value>] [--cert <pem> --keyfile <pem>]
+#              [--client-ca <pem>] [--oauth2 <id>:<secret> [--token-life <s>]]
 #
 import argparse
 import base64
 import json
 import ssl
 import threading
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -158,6 +166,7 @@ SUBMODELS = [
 ]
 
 lock  = threading.Lock()
+tokens = {}                                    # "tok-<n>": when it expires
 speed = [0.0]
 args  = None
 
@@ -318,8 +327,15 @@ class Handler(BaseHTTPRequestHandler):
     return self.rfile.read(n) if n > 0 else b""
 
   def authorized(self):
-    if args.authorization is None or self.headers.get("Authorization") == args.authorization:
+    given = self.headers.get("Authorization") or ""
+    if args.oauth2 is not None:
+      with lock:
+        if given.startswith("Bearer ") and tokens.get(given[7:], 0) > time.time():
+          return True
+    elif args.authorization is None or given == args.authorization:
       return True
+    if args.oauth2 is not None:
+      self.logLine("refused %s" % given)
     self.answer(401, {"messages": [{"messageType": "Error", "text": "unauthorized"}]})
     return False
 
@@ -377,9 +393,37 @@ class Handler(BaseHTTPRequestHandler):
       return self.answer(400, {"messages": [{"messageType": "Error", "text": "the value does not fit the element"}]})
     self.answer(204)
 
+  def token(self, raw):
+    # the client credentials grant: the client by HTTP Basic, its id and secret form-encoded (RFC 6749 2.3.1)
+    given = self.headers.get("Authorization") or ""
+    form = urllib.parse.parse_qs(raw.decode())
+    try:
+      id, _, secret = base64.b64decode(given[6:]).decode().partition(":")
+      client = urllib.parse.unquote_plus(id) + ":" + urllib.parse.unquote_plus(secret)
+    except Exception:
+      client = None
+    if not given.startswith("Basic ") or client != args.oauth2:
+      return self.answer(401, {"error": "invalid_client"})
+    if form.get("grant_type") != ["client_credentials"]:
+      return self.answer(400, {"error": "unsupported_grant_type"})
+    with lock:
+      n = len(tokens) + 1
+      tokens["tok-%d" % n] = time.time() + args.token_life
+    self.logLine("token %d scope=%s" % (n, form.get("scope", ["-"])[0]))
+    self.answer(200, {"access_token": "tok-%d" % n, "token_type": "Bearer", "expires_in": args.token_life})
+
   def do_POST(self):
     raw = self.body()
     p = self.parts()
+
+    if p == ["token"] and args.oauth2 is not None:
+      return self.token(raw)
+
+    if p == ["test", "revoke"]:
+      with lock:
+        for t in tokens:
+          tokens[t] = 0
+      return self.answer(200, {})
 
     if p[0] == "test":
       req = json.loads(raw)
@@ -419,6 +463,9 @@ def main():
   p.add_argument("--values-as-text", action="store_true")
   p.add_argument("--cert")
   p.add_argument("--keyfile")
+  p.add_argument("--client-ca")
+  p.add_argument("--oauth2")
+  p.add_argument("--token-life", type=int, default=60)
   args = p.parse_args()
 
   server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
@@ -427,6 +474,9 @@ def main():
   if args.cert:
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(args.cert, args.keyfile)
+    if args.client_ca:
+      ctx.verify_mode = ssl.CERT_REQUIRED
+      ctx.load_verify_locations(args.client_ca)
     server.socket = ctx.wrap_socket(server.socket, server_side=True)
 
   server.serve_forever()

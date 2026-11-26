@@ -33,6 +33,7 @@ typedef struct AasPushConfig
   bool         insecure;
   const char*  clientCert;
   const char*  clientKey;                             // NULL: in clientCert's file
+  const char*  clientId;                              // NULL: coraine-aas-<8 hex digits>, random
 } AasPushConfig;
 
 

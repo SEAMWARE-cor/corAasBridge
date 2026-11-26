@@ -22,6 +22,8 @@
 #include <stdio.h>                                    // snprintf
 #include <stdlib.h>                                   // malloc, free, strtol
 #include <string.h>                                   // strncmp, strchr, memcpy
+#include <time.h>                                     // clock_gettime
+#include <unistd.h>                                   // getpid
 
 #include <mosquitto.h>                                // mosquitto_*
 
@@ -197,7 +199,8 @@ static bool payloadSubmodel(const struct mosquitto_message* msgP, char* idBuf, i
 //
 //   BaSyx   sm-repository/<repo>/submodels/<id, base64url>/submodelElements/<idShortPath>/[value/]updated, ...:
 //           the id from the topic; sm-repository/<repo>/submodels/{created,updated}: from the payload
-//   FA³ST   events/<Event>Message: from the payload, the element's Submodel key
+//   FA³ST   events/<Event>Message - a change (ValueChange, Element{Create,Update,Delete}), not a read: from the
+//           payload, the element's Submodel key
 //
 static void onMessage(struct mosquitto* mosqP, void* userData, const struct mosquitto_message* msgP)
 {
@@ -234,7 +237,16 @@ static void onMessage(struct mosquitto* mosqP, void* userData, const struct mosq
       found = payloadSubmodel(msgP, id, sizeof(id));
   }
   else if ((strncmp(topic, "events/", 7) == 0) && (msgP->payloadlen > 0))
-    found = payloadSubmodel(msgP, id, sizeof(id));
+  {
+    //
+    // A change only - ValueChange, ElementCreate, ElementUpdate, ElementDelete. FA³ST tells of reads too
+    // (ElementRead, ValueRead), of invocations and errors: no reason to read
+    //
+    const char* event = &topic[7];
+
+    if ((strstr(event, "Change") != NULL) || (strstr(event, "Create") != NULL) || (strstr(event, "Update") != NULL) || (strstr(event, "Delete") != NULL))
+      found = payloadSubmodel(msgP, id, sizeof(id));
+  }
 
   if (found == false)
     return;
@@ -289,9 +301,19 @@ const char* aasPushStart(const AasPushConfig* cP)
     push.port = (int) port;
   }
 
+  //
+  // A client id of our own: without one libmosquitto sends an empty id, which a broker may refuse (FA³ST's,
+  // "identifier rejected"); 20 characters, MQTT 3.1's limit 23
+  //
+  char            clientId[32];
+  struct timespec now;
+
+  clock_gettime(CLOCK_REALTIME, &now);
+  snprintf(clientId, sizeof(clientId), "coraine-aas-%08x", (unsigned int) (now.tv_nsec ^ (now.tv_sec << 12) ^ getpid()));
+
   mosquitto_lib_init();
 
-  if ((push.mosqP = mosquitto_new(NULL, true, NULL)) == NULL)
+  if ((push.mosqP = mosquitto_new((cP->clientId != NULL) ? cP->clientId : clientId, true, NULL)) == NULL)
     return "push: the MQTT client could not be made";
 
   if ((cP->username != NULL) && (mosquitto_username_pw_set(push.mosqP, cP->username, cP->password) != MOSQ_ERR_SUCCESS))

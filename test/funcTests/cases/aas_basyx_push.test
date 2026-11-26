@@ -1,0 +1,128 @@
+#
+# FILE            aas_basyx_push.test
+#
+# Copyright 2026 Seamware
+# SPDX-License-Identifier: Apache-2.0
+#
+# Push against a real server, Eclipse BaSyx (corTest's -basyx): its change events on MQTT (its mqtt feature, to an MQTT broker beside it: sm-repository/...), the bridge's
+# "push" subscribed to them. The AssetChannel is polled every 60 s: a change at the server in within 3 s came by an
+# event. The server is given its own shell and submodel (Speed, xs:double), changed through its API.
+#
+#   the first events - until one comes in, the subscription made     (the broker is the server's: no log of it here)
+#   Speed 7.25 at BaSyx                                            in at once - the event's topic in the bridge's log
+#   Speed 8.5, Speed 9.75                                            each in at once
+#   a client reads Speed at the server                               no read by the bridge: a read is no change (FA³ST
+#                                                                    tells of it, ElementReadEvent)
+#
+# REQUIRE_FEATURE: ASSET_CHANNELS
+# SKIP_BASYX: off
+#
+--NAME--
+aas bridge - push against Eclipse BaSyx (corTest's -basyx): its MQTT change events make the AssetChannel read at once
+
+--TAGS--
+bridge aas basyx push
+
+--INIT--
+rm -rf "${AAS_TEST_DIR:?}"
+mkdir -p "$AAS_TEST_DIR"
+basyxStart || exit 1
+
+SHELL_ID=https://acme.example/ids/aas/press-21
+SM_ID=https://acme.example/ids/sm/press-21/operational
+basyxDelete shells "$SHELL_ID" > /dev/null
+basyxDelete submodels "$SM_ID" > /dev/null
+basyxPost submodels '{"modelType": "Submodel", "id": "'$SM_ID'", "idShort": "Operational", "submodelElements": [
+  {"modelType": "Property", "idShort": "Speed", "valueType": "xs:double", "value": "1.5"}]}' > /dev/null
+basyxPost shells '{"modelType": "AssetAdministrationShell", "id": "'$SHELL_ID'", "idShort": "Press21",
+  "assetInformation": {"assetKind": "Instance"},
+  "submodels": [{"type": "ModelReference", "keys": [{"type": "Submodel", "value": "'$SM_ID'"}]}]}' > /dev/null
+
+cat > $AAS_TEST_DIR/bridges.json <<J
+{ "aas": { "server": { "url": "${AAS_BASYX_URL}" },
+           "push": { "url": "${AAS_BASYX_MQTT_URL}" },
+           "ngsild": { "defaultEntity": false, "assetChannels": {
+             "$SHELL_ID": { "entities": "natural", "channelInfo": [ { "key": "pollInterval", "value": "PT60S" } ] } } } } }
+J
+brokerStart --verbose
+
+--RUN--
+basyxEnv
+SM_ID=https://acme.example/ids/sm/press-21/operational
+SPEED="$AAS_BASYX_URL/submodels/$(b64url $SM_ID)/submodel-elements/Speed/\$value"
+speed() {  # speed <value> - set at the server; the entity's after at most <secs> (3)
+  curl -sk -o /dev/null -X PATCH "$SPEED" -H 'Content-Type: application/json' -d "\"$1\""
+  entityAwait $SM_ID speed "$1" "${2:-3}" 2> /dev/null
+}
+entityAwait $SM_ID speed 1.5 30
+
+echo "01. The first events - until one comes in: subscribed"
+echo "====================================================="
+for i in $(seq 1 20); do speed "2.$i" 1 && break; done
+entityGet $SM_ID speed keyValues | grep -c '"speed": 2\.'
+echo
+echo
+
+
+echo "02. Speed 7.25 at BaSyx - in at once, by the event"
+echo "=================================================="
+speed 7.25
+entityGet $SM_ID speed keyValues
+grep -o 'aas: push: sm-repository/sm-repo/submodels/[^ ]* - submodel .https://acme.example/ids/sm/press-21/operational., 1 AssetChannel(s) read now' "$AAS_TEST_DIR/broker.log" | sed 's/submodels\/[A-Za-z0-9_=-]*\//submodels\/<operational>\//' | sort -u
+echo
+echo
+
+
+echo "03. Speed 8.5, then 9.75 - each in at once"
+echo "=========================================="
+speed 8.5 && echo "8.5 in"
+speed 9.75 && echo "9.75 in"
+echo
+echo
+
+
+echo "04. A client reads Speed at the server - a read is no change: no read by the bridge (FA³ST tells of reads too)"
+echo "=============================================================================================================="
+n1=$(grep -c 'AssetChannel(s) read now' "$AAS_TEST_DIR/broker.log")
+curl -sk -o /dev/null "${SPEED%/\$value}"
+sleep 3
+n2=$(grep -c 'AssetChannel(s) read now' "$AAS_TEST_DIR/broker.log")
+echo "reads made by events: $((n2 - n1))"
+echo
+echo
+
+
+--TEARDOWN--
+brokerStop
+basyxDelete shells https://acme.example/ids/aas/press-21 > /dev/null 2>&1
+basyxDelete submodels https://acme.example/ids/sm/press-21/operational > /dev/null 2>&1
+basyxStop
+rm -f "${AAS_TEST_DIR:?}/bridges.json"
+
+--EXPECT--
+01. The first events - until one comes in: subscribed
+=====================================================
+1
+
+
+02. Speed 7.25 at BaSyx - in at once, by the event
+==================================================
+{
+  "id": "https://acme.example/ids/sm/press-21/operational",
+  "speed": 7.25,
+  "type": "Operational"
+}
+aas: push: sm-repository/sm-repo/submodels/<operational>/submodelElements/Speed/value/updated - submodel 'https://acme.example/ids/sm/press-21/operational', 1 AssetChannel(s) read now
+
+
+03. Speed 8.5, then 9.75 - each in at once
+==========================================
+8.5 in
+9.75 in
+
+
+04. A client reads Speed at the server - a read is no change: no read by the bridge (FA³ST tells of reads too)
+==============================================================================================================
+reads made by events: 0
+
+

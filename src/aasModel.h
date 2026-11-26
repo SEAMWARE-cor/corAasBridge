@@ -132,6 +132,15 @@ extern char* aasValueOnly(CorAlloc* kaP, AasLeafKind kind, CorNode* valueP);
 
 // -----------------------------------------------------------------------------
 //
+// aasValueOnlyText - the same body with every number and boolean as a string ("421", "true"), malloc'd: the
+// form some servers take instead of IDTA-01001's JSON numbers and booleans. NULL: the value has none
+//
+extern char* aasValueOnlyText(CorAlloc* kaP, AasLeafKind kind, CorNode* valueP);
+
+
+
+// -----------------------------------------------------------------------------
+//
 // aasValueAsRead - a value that fits, as the next read of the leaf renders it once the server has it (what
 // a write's echo is told by), malloc'd
 //

@@ -14,6 +14,10 @@
 # press is not running), Log (lines xs:string -> count xs:int). A Mode written "broken" is refused (400) - a
 # value the plugin cannot know is wrong.
 #
+# With --values-as-text, a PATCH takes numbers and booleans only as strings ("421", "true") and answers 500 to
+# a JSON number or boolean - as Eclipse BaSyx does (eclipse-basyx/basyx-java-server-sdk#384, #403), where
+# IDTA-01001's ValueOnly has them as JSON numbers and booleans.
+#
 # With --authorization, a request without that Authorization header is answered 401. The test's own verbs, not
 # the API's:
 #
@@ -25,7 +29,7 @@
 # Each PATCH and each invocation is logged, one line, to the file --log names:
 # "PATCH <submodel idShort>.<idShortPath> <body>", "invoke <submodel idShort>.<idShortPath> <arguments>".
 #
-#   aasMock.py --port <p> --log <file> [--authorization <value>] [--cert <pem> --keyfile <pem>]
+#   aasMock.py --port <p> --log <file> [--values-as-text] [--authorization <value>] [--cert <pem> --keyfile <pem>]
 #
 import argparse
 import base64
@@ -90,6 +94,9 @@ SUBMODELS = [
       "valueTypeListElement": "xs:string", "value": [
         {"modelType": "Property", "valueType": "xs:string", "value": "CE"},
         {"modelType": "Property", "valueType": "xs:string", "value": "UKCA"}]},
+     {"modelType": "SubmodelElementList", "idShort": "Languages", "typeValueListElement": "SubmodelElement", "value": [
+        {"modelType": "Property", "valueType": "xs:string", "value": "en"},
+        {"modelType": "Property", "valueType": "xs:string", "value": "de"}]},
      {"modelType": "File", "idShort": "Manual", "contentType": "application/pdf", "value": "/aasx/manual.pdf"},
      {"modelType": "File", "idShort": "Logo", "contentType": "image/png", "value": "https://acme.example/logo.png"},
      {"modelType": "Blob", "idShort": "Thumbnail", "contentType": "image/png", "value": "iVBORw0KGgo="},
@@ -178,13 +185,59 @@ def valueSet(e, v):
       return False
     for k, x in v.items():
       e[k] = text(x)
-  elif t == "SubmodelElementList" and e.get("typeValueListElement") == "Property":
-    if not isinstance(v, list) or not all(fits(e["valueTypeListElement"], x) for x in v):
+  elif t == "SubmodelElementList" and listValueType(e) is not None:
+    vt = listValueType(e)
+    if not isinstance(v, list) or not all(fits(vt, x) for x in v):
       return False
-    e["value"] = [{"modelType": "Property", "valueType": e["valueTypeListElement"], "value": text(x)} for x in v]
+    e["value"] = [{"modelType": "Property", "valueType": vt, "value": text(x)} for x in v]
   else:
     return False
   return True
+
+
+def listValueType(e):
+  # a list of Properties - declared so, or of any element with Property items: their valueType
+  if e.get("typeValueListElement") == "Property":
+    return e["valueTypeListElement"]
+  items = e.get("value") or []
+  if e.get("typeValueListElement") == "SubmodelElement" and items and all(x["modelType"] == "Property" for x in items):
+    return items[0]["valueType"]
+  return None
+
+
+def scalars(v):
+  # the scalars of a ValueOnly value
+  if isinstance(v, list):
+    return [x for i in v for x in scalars(i)]
+  if isinstance(v, dict):
+    return [x for i in v.values() for x in scalars(i)]
+  return [v]
+
+
+def fromText(e, v):
+  # a ValueOnly value whose scalars are all strings, typed by the element's valueType (--values-as-text);
+  # None: one is not a string, or does not read as its type
+  def typed(valueType, x):
+    if not isinstance(x, str):
+      raise ValueError
+    if valueType in ("xs:int", "xs:integer", "xs:long", "xs:short", "xs:byte"):
+      return int(x)
+    if valueType in ("xs:double", "xs:float", "xs:decimal"):
+      return float(x)
+    if valueType == "xs:boolean":
+      return {"true": True, "false": False}[x]
+    return x
+  t = e["modelType"]
+  try:
+    if t == "Property":
+      return typed(e["valueType"], v)
+    if t == "Range" and isinstance(v, dict):
+      return {k: typed(e["valueType"], x) for k, x in v.items()}
+    if t == "SubmodelElementList" and isinstance(v, list) and listValueType(e) is not None:
+      return [typed(listValueType(e), x) for x in v]
+  except (ValueError, KeyError):
+    return None
+  return v
 
 
 def operation(name, inputs):
@@ -273,7 +326,12 @@ class Handler(BaseHTTPRequestHandler):
         return self.notFound()
       self.logLine("PATCH %s.%s %s" % (sm["idShort"], urllib.parse.unquote(p[3]), raw.decode()))
       try:
-        ok = valueSet(e, json.loads(raw))
+        v = json.loads(raw)
+        if args.values_as_text and e["modelType"] != "MultiLanguageProperty":
+          if any(not isinstance(x, str) for x in scalars(v)):
+            return self.answer(500, {"status": 500, "error": "Internal Server Error"})
+          v = fromText(e, v)
+        ok = (v is not None) and valueSet(e, v)
       except ValueError:
         ok = False
     if not ok:
@@ -319,6 +377,7 @@ def main():
   p.add_argument("--port", type=int, required=True)
   p.add_argument("--log", required=True)
   p.add_argument("--authorization")
+  p.add_argument("--values-as-text", action="store_true")
   p.add_argument("--cert")
   p.add_argument("--keyfile")
   args = p.parse_args()

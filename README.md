@@ -27,7 +27,7 @@ part of the model.
 | Blob | a leaf: the API's attachment URL, and `contentType` - the content is not copied | Property, a `contentType` sub-Property |
 | ReferenceElement | a reference of the node it is in: its idShort, its target the reference's key (more keys: `<first>#<the others, '.'-joined>`) | Relationship to an entity of the model, else Property |
 | SubmodelElementCollection | `collection` | by `attributeLayout` |
-| SubmodelElementList | of Properties: a leaf, `attributeType` ListProperty; of references: a reference each; of anything else: a collection, its items named by their index | ListProperty, ListRelationship, by `attributeLayout` |
+| SubmodelElementList | of Properties (declared so, or of any element - `SubmodelElement`, `DataElement` - and every item a Property of one valueType): a leaf, `attributeType` ListProperty; of references: a reference each; of anything else: a collection, its items named by their index | ListProperty, ListRelationship, by `attributeLayout` |
 | Operation | `operation`, its `input` and `output` variables, and `endpoint` - where the bridge invokes it (below) | no attribute - a Service Registration of its entity, that endpoint |
 | semanticId | `semanticIds` (the reference's first key) | a `semanticId` sub-Property |
 
@@ -64,6 +64,13 @@ form:
 | Range | `{ "min": 10, "max": 350 }` |
 | SubmodelElementList of Properties | `[ "CE", "UKCA" ]` - from the ListProperty's valueList |
 
+- **Numbers and booleans as strings.** IDTA-01001's ValueOnly has an `xs:int`, `xs:double`, ... as a JSON
+  number and an `xs:boolean` as a JSON boolean, and the bridge writes them so. Some servers take them only as
+  strings (`"421"`, `"true"`) - Eclipse BaSyx answers 500 to `421` ([#384](https://github.com/eclipse-basyx/basyx-java-server-sdk/issues/384),
+  [#403](https://github.com/eclipse-basyx/basyx-java-server-sdk/issues/403)). A write refused with a number or a
+  boolean in it (any 4xx or 5xx but 401, 403 and 404) is sent once more with them as strings; taken, every
+  later write to the server goes out so at once, and the log says it, once. A LanguageProperty has no number:
+  it is written once.
 - A File, a Blob and the shell's assetInformation are not written back: 422.
 - The write is queued and the client answered at once; a writer thread sends the writes one at a time. Up
   to 256 wait; a full queue is refused (503), as is a write before the server has ever answered.
@@ -136,9 +143,16 @@ own): the broker's TLS settings are not touched.
 
     make && make test          # libssl-dev; the tests run python3 and the openssl tool
 
-`test/funcTests/aasMock.py` plays the server: a shell with a Digital Nameplate and an operational-data
+`aas_basyx` runs against a real AAS server, Eclipse BaSyx's AAS environment (2.0.0-milestone-16): corTest's
+`-basyx` - an image the test starts in docker (the default when docker answers), the URL of one running (CI's
+service, `AAS_BASYX_URL`), or `off` (the test is skipped). It POSTs its own shell and submodel; an Operation BaSyx
+delegates goes to `test/funcTests/basyxDelegate.py`. BaSyx does not implement `$value` on a SubmodelElementList
+(501): a list written there is read back.
+
+The other tests run on `test/funcTests/aasMock.py`, which plays the server: a shell with a Digital Nameplate and an operational-data
 submodel, PATCHes and invocations logged, a value that does not fit refused, three Operations, https with a
-certificate made by the test, and an Authorization header.
+certificate made by the test, and an Authorization header; `--values-as-text` makes it take numbers and
+booleans as strings only, as BaSyx does.
 
 The broker must have AssetChannels; write-back (`COR_FEATURE_CHANNEL_WRITE_BACK`) for `"both"`, and Service
 Execution for the Operations.

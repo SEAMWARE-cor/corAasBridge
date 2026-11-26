@@ -29,7 +29,7 @@ AAS_TEST_DIR="${AAS_TEST_DIR:-/tmp/aas-bridge-test}"
 brokerStart() {
   brokerStop
 
-  "$AAS_BROKER" --port "$AAS_PORT" --foreground --pretty-print 2 --httpEndpoint "http://localhost:$AAS_PORT" \
+  "$AAS_BROKER" --port "$AAS_PORT" --pretty-print 2 --httpEndpoint "http://localhost:$AAS_PORT" \
                 --database ramDB --bridges "$AAS_PLUGIN" --bridgeConfig "$AAS_TEST_DIR/bridges.json" "$@" \
                 > "$AAS_TEST_DIR/broker.log" 2>&1 &
   echo $! > "$AAS_TEST_DIR/broker.pid"
@@ -72,7 +72,7 @@ brokerStop() {
 
 # -----------------------------------------------------------------------------
 #
-# mockStart [--https] [--authorization <value>] - the mock AAS server (aasMock.py) on port $AAS_MOCK_PORT
+# mockStart [--https] [--authorization <value>] [--values-as-text] - the mock AAS server (aasMock.py) on port $AAS_MOCK_PORT
 #
 # --https: with a certificate of its own, made here - issued to localhost and signed by a root of the test's
 # ($AAS_TEST_DIR/ca.pem). Its PATCHes and invocations go to $AAS_TEST_DIR/server.log.
@@ -99,6 +99,9 @@ mockStart() {
       --authorization)
         opts+=(--authorization "$2")
         shift
+        ;;
+      --values-as-text)
+        opts+=(--values-as-text)
         ;;
     esac
     shift
@@ -279,4 +282,123 @@ channelAwait() {
 #
 urlEncode() {
   python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"
+}
+
+
+# -----------------------------------------------------------------------------
+#
+# basyxEnv - AAS_BASYX_URL, where the Eclipse BaSyx AAS environment is ($AAS_BASYX, corTest's -basyx: a URL as
+# it is, an image on 127.0.0.1:$AAS_BASYX_PORT), and AAS_DELEGATE_HOST, the address BaSyx reaches the test's
+# host on: docker's bridge gateway, or (a URL: CI's job container) this host's first address. Each helper below
+# calls it: a test's sections are processes of their own
+#
+# basyxStart - basyxEnv; an image started in docker, its Operation delegation allowed to private addresses (the
+# test's delegate); returns once BaSyx answers
+#
+AAS_BASYX_PORT="${AAS_BASYX_PORT:-18082}"
+AAS_DELEGATE_PORT="${AAS_DELEGATE_PORT:-18083}"
+
+basyxEnv() {
+  case "$AAS_BASYX" in
+    http://*|https://*)
+      AAS_BASYX_URL="$AAS_BASYX"
+      AAS_DELEGATE_HOST="${AAS_DELEGATE_HOST:-$(hostname -I | awk '{print $1}')}"
+      ;;
+    *)
+      AAS_BASYX_URL="http://127.0.0.1:$AAS_BASYX_PORT"
+      AAS_DELEGATE_HOST="${AAS_DELEGATE_HOST:-$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null)}"
+      ;;
+  esac
+  export AAS_BASYX_URL AAS_DELEGATE_HOST
+}
+
+basyxStart() {
+  basyxEnv
+  case "$AAS_BASYX" in
+    http://*|https://*) ;;
+    *)
+      docker rm -f aas-test-basyx > /dev/null 2>&1
+      docker run -d --rm --name aas-test-basyx -p "127.0.0.1:$AAS_BASYX_PORT:8081" \
+             -e BASYX_SUBMODELREPOSITORY_FEATURE_OPERATION_DELEGATION_SECURITY_DENYPRIVATETARGETS=false \
+             "$AAS_BASYX" > "$AAS_TEST_DIR/basyx.id" 2>&1 || { cat "$AAS_TEST_DIR/basyx.id" >&2; return 1; }
+      ;;
+  esac
+
+  local i
+  for ((i = 0; i < 120; i++)); do
+    curl -sf -o /dev/null "$AAS_BASYX_URL/shells" && return 0
+    sleep 0.5
+  done
+
+  echo "basyxStart: no answer from $AAS_BASYX_URL after 60s" >&2
+  return 1
+}
+
+
+# -----------------------------------------------------------------------------
+#
+# basyxStop - the container basyxStart started (a URL's server is left running)
+#
+basyxStop() {
+  case "$AAS_BASYX" in
+    http://*|https://*) ;;
+    *) docker rm -f aas-test-basyx > /dev/null 2>&1 ;;
+  esac
+  return 0
+}
+
+
+# -----------------------------------------------------------------------------
+#
+# basyxDelete <shells|submodels> <id> / basyxPost <shells|submodels|submodels/<id>/submodel-elements> <json> -
+# the BaSyx API; the HTTP status
+#
+basyxDelete() {
+  basyxEnv
+  curl -s -o /dev/null -w "%{http_code}\n" -X DELETE "$AAS_BASYX_URL/$1/$(b64url "$2")"
+}
+
+basyxPost() {
+  basyxEnv
+  curl -s -o "$AAS_TEST_DIR/basyx.out" -w "%{http_code}\n" -X POST "$AAS_BASYX_URL/$1" -H 'Content-Type: application/json' -d "$2"
+}
+
+
+# -----------------------------------------------------------------------------
+#
+# b64url <id> - base64url, no padding: an AAS id in a path
+#
+b64url() {
+  python3 -c 'import base64, sys; print(base64.urlsafe_b64encode(sys.argv[1].encode()).decode().rstrip("="))' "$1"
+}
+
+
+# -----------------------------------------------------------------------------
+#
+# delegateStart / delegateStop - basyxDelegate.py on $AAS_DELEGATE_HOST:$AAS_DELEGATE_PORT: what BaSyx invokes
+# for an Operation it delegates (the Operation's qualifier invocationDelegation)
+#
+delegateStart() {
+  basyxEnv
+  delegateStop
+  python3 "$(dirname "${BASH_SOURCE[0]}")/basyxDelegate.py" --host "$AAS_DELEGATE_HOST" --port "$AAS_DELEGATE_PORT" \
+          --log "$AAS_TEST_DIR/delegate.log" > "$AAS_TEST_DIR/delegate.out" 2>&1 &
+  echo $! > "$AAS_TEST_DIR/delegate.pid"
+
+  local i
+  for ((i = 0; i < 50; i++)); do
+    (echo > "/dev/tcp/$AAS_DELEGATE_HOST/$AAS_DELEGATE_PORT") 2>/dev/null && return 0
+    sleep 0.1
+  done
+
+  echo "delegateStart: no answer on $AAS_DELEGATE_HOST:$AAS_DELEGATE_PORT - $AAS_TEST_DIR/delegate.out:" >&2
+  tail -20 "$AAS_TEST_DIR/delegate.out" >&2
+  return 1
+}
+
+delegateStop() {
+  local pidFile="$AAS_TEST_DIR/delegate.pid"
+  [ -f "$pidFile" ] || return 0
+  kill "$(cat "$pidFile")" 2>/dev/null
+  rm -f "$pidFile"
 }

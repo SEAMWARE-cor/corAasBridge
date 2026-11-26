@@ -1,0 +1,280 @@
+#
+# FILE            aas_basyx.test
+#
+# Copyright 2026 Seamware
+# SPDX-License-Identifier: Apache-2.0
+#
+# The bridge against a real AAS server, Eclipse BaSyx (the AAS environment, corTest's -basyx: started in docker,
+# or CI's service), not the mock: a shell and a submodel POSTed to BaSyx's own API, an AssetChannel on the shell
+# (natural, both, polled every 0.5 s):
+#
+#   Speed      xs:double  "1.5"              Running   xs:boolean "true"
+#   Count      xs:int     "7"                Name      a MultiLanguageProperty, en + de
+#   Limits     a Range, xs:double            Tags      a list of any element (SubmodelElement), xs:string items
+#   Manual     a ReferenceElement to the submodel itself
+#   Scale      an Operation BaSyx delegates (invocationDelegation) to basyxDelegate.py: Factor -> Result, x2
+#
+# What it shows:
+#   - the model read: the two entities, every element converted by its valueType;
+#   - a write of a number and a boolean: BaSyx takes them as strings only (eclipse-basyx/basyx-java-server-sdk
+#     #384, #403), the bridge writes them so after the first refusal - BaSyx has the values;
+#   - a LanguageProperty written in its ValueOnly form;
+#   - a change made at BaSyx comes in with the next poll;
+#   - the Operation registered as a service of the submodel's entity and executed through BaSyx's /invoke;
+#   - a write to the list: BaSyx does not implement $value on a SubmodelElementList (501) - the element is
+#     read back, the entity keeps what BaSyx has.
+#
+# REQUIRE_FEATURE: ASSET_CHANNELS
+# REQUIRE_FEATURE: CHANNEL_WRITE_BACK
+# REQUIRE_FEATURE: SERVICE_EXECUTION
+# SKIP_BASYX: off
+#
+--NAME--
+aas bridge - against Eclipse BaSyx: read, polled, written back, an Operation executed
+
+--TAGS--
+bridge aas basyx
+
+--INIT--
+rm -rf "${AAS_TEST_DIR:?}"
+mkdir -p "$AAS_TEST_DIR"
+basyxStart || exit 1
+delegateStart
+
+SHELL_ID=https://acme.example/ids/aas/press-19
+SM_ID=https://acme.example/ids/sm/press-19/operational
+basyxDelete shells "$SHELL_ID" > /dev/null
+basyxDelete submodels "$SM_ID" > /dev/null
+
+basyxPost submodels '{"modelType": "Submodel", "id": "'$SM_ID'", "idShort": "Operational", "submodelElements": [
+  {"modelType": "Property", "idShort": "Speed", "valueType": "xs:double", "value": "1.5"},
+  {"modelType": "Property", "idShort": "Count", "valueType": "xs:int", "value": "7"},
+  {"modelType": "Property", "idShort": "Running", "valueType": "xs:boolean", "value": "true"},
+  {"modelType": "MultiLanguageProperty", "idShort": "Name", "value": [{"language": "en", "text": "Press"}, {"language": "de", "text": "Presse"}]},
+  {"modelType": "Range", "idShort": "Limits", "valueType": "xs:double", "min": "0", "max": "400"},
+  {"modelType": "SubmodelElementList", "idShort": "Tags", "typeValueListElement": "SubmodelElement", "orderRelevant": true, "value": [
+    {"modelType": "Property", "valueType": "xs:string", "value": "hydraulic"},
+    {"modelType": "Property", "valueType": "xs:string", "value": "line-2"}]},
+  {"modelType": "ReferenceElement", "idShort": "Manual", "value": {"type": "ModelReference", "keys": [{"type": "Submodel", "value": "'$SM_ID'"}]}},
+  {"modelType": "Operation", "idShort": "Scale",
+   "qualifiers": [{"type": "invocationDelegation", "valueType": "xs:string", "kind": "ConceptQualifier",
+                   "value": "http://'$AAS_DELEGATE_HOST:$AAS_DELEGATE_PORT'/scale"}],
+   "inputVariables": [{"value": {"modelType": "Property", "idShort": "Factor", "valueType": "xs:double"}}],
+   "outputVariables": [{"value": {"modelType": "Property", "idShort": "Result", "valueType": "xs:double"}}]}]}' > /dev/null
+basyxPost shells '{"modelType": "AssetAdministrationShell", "id": "'$SHELL_ID'", "idShort": "Press19",
+  "assetInformation": {"assetKind": "Instance", "globalAssetId": "https://acme.example/assets/press-19"},
+  "submodels": [{"type": "ModelReference", "keys": [{"type": "Submodel", "value": "'$SM_ID'"}]}]}' > /dev/null
+
+cat > $AAS_TEST_DIR/bridges.json <<J
+{ "aas": { "server": { "url": "$AAS_BASYX_URL" },
+           "ngsild": { "defaultEntity": false, "assetChannels": {
+             "$SHELL_ID": { "entities": "natural", "channelDirection": "both",
+                            "channelInfo": [ { "key": "pollInterval", "value": "PT0.5S" } ] } } } } }
+J
+brokerStart
+
+--RUN--
+basyxEnv
+SM_ID=https://acme.example/ids/sm/press-19/operational
+SHELL_ID=https://acme.example/ids/aas/press-19
+SM="$AAS_BASYX_URL/submodels/$(b64url $SM_ID)/submodel-elements"
+B="http://localhost:$AAS_PORT/ngsi-ld/v1"
+basyxValue() {  # basyxValue <idShortPath> - BaSyx's $value of an element
+  curl -s "$SM/$1/\$value"; echo
+}
+entityAwait $SM_ID speed 1.5 30
+
+echo "01. The two entities - every element converted by its valueType, the list a ListProperty"
+echo "=========================================================================================="
+curl -s "$B/entities?type=Shell,Operational" | python3 -c 'import sys, json
+print(json.dumps(sorted(json.load(sys.stdin), key=lambda e: e["id"]), indent=2, sort_keys=True))'
+echo
+echo
+
+
+echo "02. PATCH count 8, running false - BaSyx refuses the number, takes the strings; BaSyx has them"
+echo "=============================================================================================="
+attrPatch $SM_ID count '{"value": 8}'
+attrPatch $SM_ID running '{"value": false}'
+for i in $(seq 1 50); do [ "$(basyxValue Running)" = '"false"' ] && break; sleep 0.1; done
+basyxValue Count
+basyxValue Running
+grep -c 'the server takes numbers and booleans as strings only' "$AAS_TEST_DIR/broker.log"
+echo
+echo
+
+
+echo "03. PATCH name - a LanguageProperty, the MLP's ValueOnly form; BaSyx has it"
+echo "==========================================================================="
+attrPatch $SM_ID name '{"type": "LanguageProperty", "languageMap": {"en": "Press 19", "de": "Presse 19"}}'
+for i in $(seq 1 50); do basyxValue Name | grep -q 'Press 19' && break; sleep 0.1; done
+basyxValue Name
+echo
+echo
+
+
+echo "04. Speed changed at BaSyx - the entity follows with the next poll"
+echo "=================================================================="
+curl -s -o /dev/null -w "%{http_code}\n" -X PATCH "$SM/Speed/\$value" -H 'Content-Type: application/json' -d '"2.25"'
+entityAwait $SM_ID speed 2.25
+entityGet $SM_ID speed,count,running,name,limits keyValues
+echo
+echo
+
+
+echo "05. Scale - registered as a service of the submodel's entity, executed through BaSyx's /invoke"
+echo "=============================================================================================="
+curl -s "$B/serviceRegistrations" | python3 -c 'import sys, json
+for r in json.load(sys.stdin):
+  print(r["serviceInformation"]["serviceName"], r["entities"][0]["id"], json.dumps(r["serviceInformation"].get("inputSchema"), sort_keys=True))'
+curl -s -w "\n%{http_code}\n" "$B/entities/$(urlEncode $SM_ID)/services/Scale" -H 'Content-Type: application/json' -d '{"Factor": 21}'
+cat "$AAS_TEST_DIR/delegate.log"
+echo
+echo
+
+
+echo "06. PATCH tags - BaSyx does not implement \$value on a list (501): read back, the entity keeps BaSyx's"
+echo "====================================================================================================="
+attrPatch $SM_ID tags '{"type": "ListProperty", "valueList": ["hydraulic", "line-3"]}'
+for i in $(seq 1 50); do grep -q 'Tags/\$value.*501' "$AAS_TEST_DIR/broker.log" && break; sleep 0.1; done
+grep -o 'Tags/\$value \["hydraulic","line-3"\]: 501' "$AAS_TEST_DIR/broker.log"
+entityAwait $SM_ID tags line-2
+entityGet $SM_ID tags keyValues
+echo
+echo
+
+
+--TEARDOWN--
+brokerStop
+delegateStop
+basyxDelete shells https://acme.example/ids/aas/press-19 > /dev/null 2>&1
+basyxDelete submodels https://acme.example/ids/sm/press-19/operational > /dev/null 2>&1
+basyxStop
+rm -f "${AAS_TEST_DIR:?}/bridges.json"
+
+--EXPECT--
+01. The two entities - every element converted by its valueType, the list a ListProperty
+==========================================================================================
+[
+  {
+    "assetKind": {
+      "type": "Property",
+      "value": "Instance"
+    },
+    "globalAssetId": {
+      "type": "Property",
+      "value": "https://acme.example/assets/press-19"
+    },
+    "id": "https://acme.example/ids/aas/press-19",
+    "operational": {
+      "object": "https://acme.example/ids/sm/press-19/operational",
+      "type": "Relationship"
+    },
+    "type": "Shell"
+  },
+  {
+    "count": {
+      "type": "Property",
+      "value": 7
+    },
+    "id": "https://acme.example/ids/sm/press-19/operational",
+    "limits": {
+      "type": "Property",
+      "value": {
+        "max": 400,
+        "min": 0
+      }
+    },
+    "manual": {
+      "object": "https://acme.example/ids/sm/press-19/operational",
+      "type": "Relationship"
+    },
+    "name": {
+      "languageMap": {
+        "de": "Presse",
+        "en": "Press"
+      },
+      "type": "LanguageProperty"
+    },
+    "running": {
+      "type": "Property",
+      "value": true
+    },
+    "speed": {
+      "type": "Property",
+      "value": 1.5
+    },
+    "tags": {
+      "type": "ListProperty",
+      "valueList": [
+        "hydraulic",
+        "line-2"
+      ]
+    },
+    "type": "Operational"
+  }
+]
+
+
+02. PATCH count 8, running false - BaSyx refuses the number, takes the strings; BaSyx has them
+==============================================================================================
+204
+204
+"8"
+"false"
+1
+
+
+03. PATCH name - a LanguageProperty, the MLP's ValueOnly form; BaSyx has it
+===========================================================================
+204
+[{"en":"Press 19"},{"de":"Presse 19"}]
+
+
+04. Speed changed at BaSyx - the entity follows with the next poll
+==================================================================
+204
+{
+  "count": 8,
+  "id": "https://acme.example/ids/sm/press-19/operational",
+  "limits": {
+    "max": 400,
+    "min": 0
+  },
+  "name": {
+    "languageMap": {
+      "de": "Presse 19",
+      "en": "Press 19"
+    }
+  },
+  "running": false,
+  "speed": 2.25,
+  "type": "Operational"
+}
+
+
+05. Scale - registered as a service of the submodel's entity, executed through BaSyx's /invoke
+==============================================================================================
+Scale https://acme.example/ids/sm/press-19/operational {"additionalProperties": false, "properties": {"Factor": {"type": "number"}}, "required": ["Factor"], "type": "object"}
+{
+  "Result": 42
+}
+
+200
+scale Factor=21
+
+
+06. PATCH tags - BaSyx does not implement $value on a list (501): read back, the entity keeps BaSyx's
+=====================================================================================================
+204
+Tags/$value ["hydraulic","line-3"]: 501
+{
+  "id": "https://acme.example/ids/sm/press-19/operational",
+  "tags": [
+    "hydraulic",
+    "line-2"
+  ],
+  "type": "Operational"
+}
+
+

@@ -1,0 +1,208 @@
+#
+# FILE            aas_values_as_text.test
+#
+# Copyright 2026 Seamware
+# SPDX-License-Identifier: Apache-2.0
+#
+# A server that takes ValueOnly numbers and booleans only as strings (the mock's --values-as-text: "421", not
+# 421 - as Eclipse BaSyx does, eclipse-basyx/basyx-java-server-sdk#384 and #403; IDTA-01001's ValueOnly has
+# them as JSON numbers and booleans). The bridge writes the spec's form first; refused with a number or a
+# boolean in it, it writes the same value once more with them as strings - taken, every later write to the
+# server goes out so at once, and the log says it once:
+#
+#   yearOfConstruction    an xs:int Property      2025 refused (500), "2025" taken; 2026 straight as "2026"
+#   running               an xs:boolean Property  "false"
+#   pressureRange         a Range                 { "min": "10", "max": "350" }
+#   mode                  an xs:string Property   "manual", as ever - no second body
+#   manufacturerName      a MultiLanguageProperty its ValueOnly form, as ever - no second body
+#   languages             a list declared of any element (typeValueListElement SubmodelElement) whose items are
+#                         xs:string Properties: a ListProperty, written as one
+#
+# A value the server refuses as a string too is read back, as any refused write.
+#
+# REQUIRE_FEATURE: ASSET_CHANNELS
+# REQUIRE_FEATURE: CHANNEL_WRITE_BACK
+#
+--NAME--
+aas bridge - a server that takes numbers and booleans as strings only: the write once more, then always so
+
+--TAGS--
+bridge aas
+
+--INIT--
+rm -rf "${AAS_TEST_DIR:?}"
+mkdir -p "$AAS_TEST_DIR"
+cat > $AAS_TEST_DIR/bridges.json <<J
+{ "aas": { "server": { "url": "http://localhost:$AAS_MOCK_PORT" },
+           "ngsild": { "defaultEntity": false, "assetChannels": {
+             "https://acme.example/ids/aas/press-17": { "entities": "natural", "channelDirection": "both",
+                                                        "channelInfo": [ { "key": "pollInterval", "value": "PT0.2S" } ] } } } } }
+J
+mockStart --values-as-text
+brokerStart
+
+--RUN--
+OP=https://acme.example/ids/sm/press-17/operational
+NP=https://acme.example/ids/sm/press-17/nameplate
+entityAwait $OP pressure 212.5
+
+echo "01. languages - a list of any element, its items xs:string Properties: a ListProperty"
+echo "======================================================================================"
+entityGet $NP languages
+echo
+echo
+
+
+echo "02. PATCH yearOfConstruction 2025 - 2025 refused (500), \"2025\" taken; the entity has 2025"
+echo "=========================================================================================="
+attrPatch $NP yearOfConstruction '{"value": 2025}'
+serverAwait 'PATCH Nameplate.YearOfConstruction "2025"'
+serverLog
+entityAwait $NP yearOfConstruction 2025
+entityGet $NP yearOfConstruction keyValues
+echo
+echo
+
+
+echo "03. The broker's log says it once"
+echo "================================="
+grep -c 'the server takes numbers and booleans as strings only' "$AAS_TEST_DIR/broker.log"
+echo
+echo
+
+
+echo "04. PATCH yearOfConstruction 2026, running false, pressureRange - as strings at once"
+echo "==================================================================================="
+: > "$AAS_TEST_DIR/server.log"
+attrPatch $NP yearOfConstruction '{"value": 2026}'
+serverAwait 'PATCH Nameplate.YearOfConstruction "2026"'
+attrPatch $OP running '{"value": false}'
+serverAwait 'PATCH OperationalData.Running "false"'
+attrPatch $OP pressureRange '{"value": {"min": 10, "max": 350}}'
+serverAwait 'PATCH OperationalData.PressureRange {"min":"10","max":"350"}'
+echo
+echo
+
+
+echo "05. mode, manufacturerName, languages - no number in them: as they always were"
+echo "=============================================================================="
+attrPatch $OP mode '{"value": "manual"}'
+serverAwait 'PATCH OperationalData.Mode "manual"'
+attrPatch $NP manufacturerName '{"type": "LanguageProperty", "languageMap": {"en": "ACME"}}'
+serverAwait 'PATCH Nameplate.ManufacturerName [{"en":"ACME"}]'
+attrPatch $NP languages '{"type": "ListProperty", "valueList": ["en", "de", "fr"]}'
+serverAwait 'PATCH Nameplate.Languages ["en","de","fr"]'
+echo
+echo
+
+
+echo "06. What the server has now - read back by the bridge"
+echo "====================================================="
+entityAwait $OP running false
+entityAwait $NP languages fr
+entityGet $OP running,pressureRange,mode keyValues
+entityGet $NP yearOfConstruction,languages keyValues
+echo
+echo
+
+
+echo "07. The server's PATCHes since 04 - one each"
+echo "============================================"
+serverLog
+echo
+echo
+
+
+--TEARDOWN--
+brokerStop
+mockStop
+rm -f "${AAS_TEST_DIR:?}/bridges.json"
+
+--EXPECT--
+01. languages - a list of any element, its items xs:string Properties: a ListProperty
+======================================================================================
+{
+  "id": "https://acme.example/ids/sm/press-17/nameplate",
+  "languages": {
+    "type": "ListProperty",
+    "valueList": [
+      "en",
+      "de"
+    ]
+  },
+  "type": "Nameplate"
+}
+
+
+02. PATCH yearOfConstruction 2025 - 2025 refused (500), "2025" taken; the entity has 2025
+==========================================================================================
+204
+PATCH Nameplate.YearOfConstruction "2025"
+PATCH Nameplate.YearOfConstruction 2025
+PATCH Nameplate.YearOfConstruction "2025"
+{
+  "id": "https://acme.example/ids/sm/press-17/nameplate",
+  "type": "Nameplate",
+  "yearOfConstruction": 2025
+}
+
+
+03. The broker's log says it once
+=================================
+1
+
+
+04. PATCH yearOfConstruction 2026, running false, pressureRange - as strings at once
+===================================================================================
+204
+PATCH Nameplate.YearOfConstruction "2026"
+204
+PATCH OperationalData.Running "false"
+204
+PATCH OperationalData.PressureRange {"min":"10","max":"350"}
+
+
+05. mode, manufacturerName, languages - no number in them: as they always were
+==============================================================================
+204
+PATCH OperationalData.Mode "manual"
+204
+PATCH Nameplate.ManufacturerName [{"en":"ACME"}]
+204
+PATCH Nameplate.Languages ["en","de","fr"]
+
+
+06. What the server has now - read back by the bridge
+=====================================================
+{
+  "id": "https://acme.example/ids/sm/press-17/operational",
+  "mode": "manual",
+  "pressureRange": {
+    "max": 350,
+    "min": 10
+  },
+  "running": false,
+  "type": "OperationalData"
+}
+{
+  "id": "https://acme.example/ids/sm/press-17/nameplate",
+  "languages": [
+    "en",
+    "de",
+    "fr"
+  ],
+  "type": "Nameplate",
+  "yearOfConstruction": 2026
+}
+
+
+07. The server's PATCHes since 04 - one each
+============================================
+PATCH Nameplate.YearOfConstruction "2026"
+PATCH OperationalData.Running "false"
+PATCH OperationalData.PressureRange {"min":"10","max":"350"}
+PATCH OperationalData.Mode "manual"
+PATCH Nameplate.ManufacturerName [{"en":"ACME"}]
+PATCH Nameplate.Languages ["en","de","fr"]
+
+

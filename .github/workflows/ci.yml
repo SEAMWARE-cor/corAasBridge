@@ -27,6 +27,17 @@ jobs:
     env:
       SEAMWARE_PLUGIN_DIR: /opt/seamware/plugins
 
+    #
+    # A real AAS server for aas_basyx (the rest run on the mock): Eclipse BaSyx's AAS environment, reached as
+    # http://basyx:8081 from the job's container. Its Operation delegation goes to the test's delegate in the
+    # job's container - a private address, which BaSyx refuses unless told otherwise
+    #
+    services:
+      basyx:
+        image: eclipsebasyx/aas-environment:2.0.0-milestone-16
+        env:
+          BASYX_SUBMODELREPOSITORY_FEATURE_OPERATION_DELEGATION_SECURITY_DENYPRIVATETARGETS: "false"
+
     steps:
       - name: The openssl tool - the test makes the mock server's certificate
         run: command -v openssl || (apt-get update -qq && apt-get install -y -qq openssl)
@@ -80,6 +91,7 @@ jobs:
         #
         env:
           CORJSON: ${{ github.workspace }}/stack/corJson/bin/corJson
+          AAS_BASYX_URL: http://basyx:8081
         run: make test CORTEST=../corLibs/bin/corTest
 
       - name: Keep what a failing test left
@@ -92,3 +104,4 @@ jobs:
             stack/bridge/test/funcTests/cases/*.diff
             stack/bridge/test/funcTests/cases/*.stderr
             /tmp/aas-bridge-test/broker.log
+            /tmp/aas-bridge-test/delegate.log

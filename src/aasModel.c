@@ -472,6 +472,60 @@ char* aasValueOnly(CorAlloc* kaP, AasLeafKind kind, CorNode* valueP)
 
 // -----------------------------------------------------------------------------
 //
+// scalarAsText - a number or a boolean as a string node; anything else as it is. *changedP: one was
+//
+static CorNode* scalarAsText(CorAlloc* kaP, CorNode* valueP, bool* changedP)
+{
+  if ((valueP->type != CorInt) && (valueP->type != CorFloat) && (valueP->type != CorBoolean))
+    return corTreeClone(kaP, valueP);
+
+  char*    text  = aasValueText(valueP);
+  CorNode* textP = (text != NULL) ? corTreeString(kaP, valueP->name, corAllocStrdup(kaP, text)) : NULL;
+
+  if (text != NULL) free(text);
+  *changedP = true;
+
+  return textP;
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
+// aasValueOnlyText -
+//
+char* aasValueOnlyText(CorAlloc* kaP, AasLeafKind kind, CorNode* valueP)
+{
+  if (kind == AasLeafLanguage)
+    return NULL;
+
+  bool     changed = false;
+  CorNode* textP   = NULL;
+
+  if ((valueP->type == CorObject) || (valueP->type == CorArray))
+  {
+    textP = (valueP->type == CorObject) ? corTreeObject(kaP, valueP->name) : corTreeArray(kaP, valueP->name);
+
+    for (CorNode* itemP = valueP->value.head; itemP != NULL; itemP = itemP->next)
+    {
+      CorNode* itemTextP = scalarAsText(kaP, itemP, &changed);
+
+      if (itemTextP == NULL)
+        return NULL;
+
+      corTreeChildAdd(textP, itemTextP);
+    }
+  }
+  else
+    textP = scalarAsText(kaP, valueP, &changed);
+
+  return ((changed == true) && (textP != NULL)) ? aasRender(textP) : NULL;
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
 // aasValueAsRead -
 //
 char* aasValueAsRead(CorAlloc* kaP, AasLeafKind kind, const char* valueType, CorNode* valueP)
@@ -870,7 +924,39 @@ static void elementsAdd(Walk* wP, CorNode* parentP, CorNode* elementsP, const ch
 
 // -----------------------------------------------------------------------------
 //
-// listAdd - a SubmodelElementList: of Properties a ListProperty, of references a reference each, of
+// propertyItems - a list declared of any element (typeValueListElement SubmodelElement, DataElement) whose items
+// are all Properties of one valueType: that valueType. NULL: they are not
+//
+static const char* propertyItems(CorNode* itemsP)
+{
+  const char* valueType = NULL;
+
+  if ((itemsP == NULL) || (itemsP->value.head == NULL))
+    return NULL;
+
+  for (CorNode* itemP = itemsP->value.head; itemP != NULL; itemP = itemP->next)
+  {
+    const char* modelType = str(itemP, "modelType");
+    const char* itemType  = str(itemP, "valueType");
+
+    if ((modelType == NULL) || (strcmp(modelType, "Property") != 0) || (itemType == NULL))
+      return NULL;
+
+    if (valueType == NULL)
+      valueType = itemType;
+    else if (strcmp(valueType, itemType) != 0)
+      return NULL;
+  }
+
+  return valueType;
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
+// listAdd - a SubmodelElementList: of Properties a ListProperty (declared so, or of any element and all its items
+// Properties of one valueType), of references a reference each, of
 // anything else a collection whose items are named by their index
 //
 static void listAdd(Walk* wP, CorNode* parentP, CorNode* elementP, const char* idShort, const char* path)
@@ -879,6 +965,17 @@ static void listAdd(Walk* wP, CorNode* parentP, CorNode* elementP, const char* i
   CorNode*    itemsP    = member(elementP, "value", CorArray);
   const char* itemType  = str(elementP, "typeValueListElement");
   const char* valueType = str(elementP, "valueTypeListElement");
+
+  if ((itemType != NULL) && ((strcmp(itemType, "SubmodelElement") == 0) || (strcmp(itemType, "DataElement") == 0)))
+  {
+    const char* itemsType = propertyItems(itemsP);
+
+    if (itemsType != NULL)
+    {
+      itemType  = "Property";
+      valueType = (valueType != NULL) ? valueType : itemsType;
+    }
+  }
 
   if ((itemType != NULL) && (strcmp(itemType, "ReferenceElement") == 0))
   {

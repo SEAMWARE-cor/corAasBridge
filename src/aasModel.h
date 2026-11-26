@@ -21,16 +21,18 @@
 //                               its "contentType"
 //   Blob                        a leaf, the value the API's attachment URL, and its "contentType" - the content
 //                               itself is not copied
-//   ReferenceElement            a reference of the node it is in: { "type": idShort, "target": its last key }
-//   SubmodelElementCollection   { "node": "collection", "name": idShort, "children" }
+//   ReferenceElement            a reference of the node it is in: { "type": idShort, "target" }, the target the
+//                               id of the node it refers to - a shell's or a submodel's id, an element's
+//                               "<submodel id>#<idShortPath>" - or, for an external reference, its key's value
+//   SubmodelElementCollection   { "node": "collection", "id", "name": idShort, "children" }
 //   SubmodelElementList         of values: a leaf, "attributeType": "ListProperty", the values; of references: a
 //                               reference each (a ListRelationship); of anything else: a collection, its items
 //                               named by their index
 //   Operation                   { "node": "operation", "id", "name", "input", "output" } - a service (aasService.h)
 //   Entity, RelationshipElement, AnnotatedRelationshipElement, Capability, BasicEventElement: not mapped
 //
-// A leaf's "id" is "<submodel id>#<idShortPath>" (Unit.Pressure, Markings[0]): what a value change, and a
-// client's write back, name.
+// A leaf's and a collection's "id" is "<submodel id>#<idShortPath>" (Unit.Pressure, Stations[1]): what a
+// value change, a client's write back and a reference name.
 //
 #include <stdbool.h>                                  // bool
 

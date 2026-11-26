@@ -13,9 +13,11 @@
 #                         declared of Properties, or of any element with Property items (Languages) -
 #                         a File its URL (a path on the server: the API's attachment URL) and contentType, a Blob
 #                         the attachment URL; a Property with no value, and a Capability, make nothing
-#   OperationalData       values converted by valueType (xs:double, xs:boolean), a Range { min, max }, a
-#                         ReferenceElement to the Nameplate a Relationship, an external one a Property; the
-#                         Operations make no attribute
+#   OperationalData       values converted by valueType (xs:double, xs:boolean), a Range { min, max }, a list
+#                         of collections its items flattened by index (Stations); ReferenceElements: to the
+#                         Nameplate a Relationship, to an element in it (AddressInformation.Street) or in its own
+#                         submodel (Stations[1]) a Relationship to that submodel's entity and a targetNode, an
+#                         external one a Property; the Operations make no attribute
 #
 # GET /admin/bridges/aas/inventory - the server's shells and submodels; ?from=<id> - that one's model.
 #
@@ -204,6 +206,14 @@ rm -f "${AAS_TEST_DIR:?}/bridges.json"
       "type": "Relationship"
     },
     "id": "https://acme.example/ids/sm/press-17/operational",
+    "lastStation": {
+      "object": "https://acme.example/ids/sm/press-17/operational",
+      "targetNode": {
+        "type": "Property",
+        "value": "https://acme.example/ids/sm/press-17/operational#Stations[1]"
+      },
+      "type": "Relationship"
+    },
     "mode": {
       "type": "Property",
       "value": "auto"
@@ -222,6 +232,22 @@ rm -f "${AAS_TEST_DIR:?}/bridges.json"
     "running": {
       "type": "Property",
       "value": true
+    },
+    "stations0Name": {
+      "type": "Property",
+      "value": "Infeed"
+    },
+    "stations1Name": {
+      "type": "Property",
+      "value": "Outfeed"
+    },
+    "street": {
+      "object": "https://acme.example/ids/sm/press-17/nameplate",
+      "targetNode": {
+        "type": "Property",
+        "value": "https://acme.example/ids/sm/press-17/nameplate#AddressInformation.Street"
+      },
+      "type": "Relationship"
     },
     "type": "OperationalData"
   }
@@ -274,6 +300,7 @@ submodel https://acme.example/ids/sm/press-17/operational OperationalData
   property Running https://acme.example/ids/sm/press-17/operational#Running true null null
   property Mode https://acme.example/ids/sm/press-17/operational#Mode "auto" null null
   property PressureRange https://acme.example/ids/sm/press-17/operational#PressureRange {"min": 0, "max": 400} null null
+  collection Stations https://acme.example/ids/sm/press-17/operational#Stations null null null
   operation SetSpeed https://acme.example/ids/sm/press-17/operational#SetSpeed null [{"name": "speed", "valueType": "xs:double"}, {"name": "ramp", "valueType": "xs:boolean"}] [{"name": "previous", "valueType": "xs:double"}]
     endpoint aas+http://localhost:REGEX([0-9]+)/submodels/aHR0cHM6Ly9hY21lLmV4YW1wbGUvaWRzL3NtL3ByZXNzLTE3L29wZXJhdGlvbmFs/submodel-elements/SetSpeed
   operation Stop https://acme.example/ids/sm/press-17/operational#Stop null [] []
@@ -282,6 +309,8 @@ submodel https://acme.example/ids/sm/press-17/operational OperationalData
     endpoint aas+http://localhost:REGEX([0-9]+)/submodels/aHR0cHM6Ly9hY21lLmV4YW1wbGUvaWRzL3NtL3ByZXNzLTE3L29wZXJhdGlvbmFs/submodel-elements/Log
   reference Documentation https://acme.example/ids/sm/press-17/nameplate
   reference Certificate https://certs.example/p17
+  reference Street https://acme.example/ids/sm/press-17/nameplate#AddressInformation.Street
+  reference LastStation https://acme.example/ids/sm/press-17/operational#Stations[1]
 
 
 05. The inventory from an id the server does not have - 404

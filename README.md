@@ -25,8 +25,8 @@ part of the model.
 | Range | a leaf, `{ "min", "max" }` converted | Property |
 | File | a leaf: its URL - a path on the server (a file of the AASX package) the API's attachment URL - and `contentType` | Property, a `contentType` sub-Property |
 | Blob | a leaf: the API's attachment URL, and `contentType` - the content is not copied | Property, a `contentType` sub-Property |
-| ReferenceElement | a reference of the node it is in: its idShort, its target the reference's key (more keys: `<first>#<the others, '.'-joined>`) | Relationship to an entity of the model, else Property |
-| SubmodelElementCollection | `collection` | by `attributeLayout` |
+| ReferenceElement | a reference of the node it is in: its idShort, its target the id of the node it refers to - the reference's key; more keys (an element): `<submodel id>#<idShortPath>`, a list's item by its index (`Stations[1]`) | Relationship to the entity the node is or is in - of this AssetChannel or another one; to an element with a `targetNode` sub-Property, its id; else Property |
+| SubmodelElementCollection | `collection`, its id `<submodel id>#<idShortPath>` | by `attributeLayout` |
 | SubmodelElementList | of Properties (declared so, or of any element - `SubmodelElement`, `DataElement` - and every item a Property of one valueType): a leaf, `attributeType` ListProperty; of references: a reference each; of anything else: a collection, its items named by their index | ListProperty, ListRelationship, by `attributeLayout` |
 | Operation | `operation`, its `input` and `output` variables, and `endpoint` - where the bridge invokes it (below) | no attribute - a Service Registration of its entity, that endpoint |
 | semanticId | `semanticIds` (the reference's first key) | a `semanticId` sub-Property |

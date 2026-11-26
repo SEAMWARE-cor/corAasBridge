@@ -18,8 +18,8 @@
 #   - the Operation registered as a service of the submodel's entity, its invocation sent to FA³ST's /invoke:
 #     FA³ST runs an Operation only through an asset connection of its configuration, and has none here - it
 #     answers 500, the client 502 with FA³ST's reason;
-#   - a write to a list of any element (SubmodelElement): FA³ST cannot read its ValueOnly form (500) - the
-#     element is read back, the entity keeps what FA³ST has.
+#   - a write to the list, three items for two: written whole, a PUT of the element - by $value FA³ST cannot
+#     write a list of any element (500), and keeps the items it had when their number changes; FA³ST has the three.
 #
 # REQUIRE_FEATURE: ASSET_CHANNELS
 # REQUIRE_FEATURE: CHANNEL_WRITE_BACK
@@ -126,12 +126,12 @@ echo
 echo
 
 
-echo "06. PATCH tags - FA³ST cannot read a list of any element's ValueOnly form (500): read back, the entity keeps FA³ST's"
-echo "===================================================================================================================="
-attrPatch $SM_ID tags '{"type": "ListProperty", "valueList": ["hydraulic", "line-3"]}'
-for i in $(seq 1 50); do grep -q 'Tags/\$value.*: 500' "$AAS_TEST_DIR/broker.log" && break; sleep 0.1; done
-grep -o 'Tags/\$value \["hydraulic","line-3"\]: 500' "$AAS_TEST_DIR/broker.log"
-entityAwait $SM_ID tags line-2
+echo "06. PATCH tags, three items for two - the list written whole, a PUT of the element; FA³ST has the three"
+echo "======================================================================================================="
+attrPatch $SM_ID tags '{"type": "ListProperty", "valueList": ["hydraulic", "line-3", "press"]}'
+for i in $(seq 1 50); do curl -sk "$SM/Tags" | grep -q press && break; sleep 0.1; done
+curl -sk "$SM/Tags" | python3 -c 'import sys, json; print(json.dumps([x["value"] for x in json.load(sys.stdin)["value"]]))'
+entityAwait $SM_ID tags press
 entityGet $SM_ID tags keyValues
 echo
 echo
@@ -253,15 +253,16 @@ The AAS operation failed
 True
 
 
-06. PATCH tags - FA³ST cannot read a list of any element's ValueOnly form (500): read back, the entity keeps FA³ST's
-====================================================================================================================
+06. PATCH tags, three items for two - the list written whole, a PUT of the element; FA³ST has the three
+=======================================================================================================
 204
-Tags/$value ["hydraulic","line-3"]: 500
+["hydraulic", "line-3", "press"]
 {
   "id": "https://acme.example/ids/sm/press-19/operational",
   "tags": [
     "hydraulic",
-    "line-2"
+    "line-3",
+    "press"
   ],
   "type": "Operational"
 }

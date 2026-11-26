@@ -35,6 +35,7 @@
 #include "corAlloc/corAllocStrdup.h"                  // corAllocStrdup
 #include "corTree/CorNode.h"                          // CorNode
 #include "corTree/corTreeBuilder.h"                   // corTreeObject, corTreeArray, corTreeString, corTreeChildAdd
+#include "corTree/corTreeChildReplace.h"              // corTreeChildReplace
 #include "corTree/corTreeClone.h"                     // corTreeClone
 #include "corTree/corTreeLookup.h"                    // corTreeLookup
 
@@ -91,6 +92,7 @@ typedef struct Job
   char*         body;
   char*         bodyText;                             // the body, numbers and booleans as strings (NULL: none)
   char*         echo;                                 // the value as the next read renders it
+  bool          list;                                 // a list: path the element's, written by a PUT of the element
   AasTarget     target;                               // an invocation's - its own TLS context
   char*         executionId;
   char*         input;
@@ -531,20 +533,122 @@ static Job* jobNext(Queue* qP)
 
 // -----------------------------------------------------------------------------
 //
-// leafWrite - PATCH a leaf's $value; refused, the leaf is read back
+// listWrite - a list's new values: the element read (GET), its items replaced, written whole (PUT); the status,
+// the server's answer (or why not) malloc'd in *answerP
+//
+static int listWrite(Job* jP, char** answerP)
+{
+  CorAlloc ka;
+  char     kaBuf[16 * 1024];
+  char*    got    = NULL;
+  int      status = aasRequest(&target, "GET", jP->path, NULL, &got, TIMEOUT_MS);
+
+  if (status != 200)
+  {
+    *answerP = got;
+    return status;
+  }
+
+  corAllocBufferInit(&ka, kaBuf, sizeof(kaBuf), 64 * 1024, NULL, "aas list write");
+
+  CorNode*    elementP = (got != NULL) ? aasParse(&ka, got) : NULL;
+  CorNode*    itemsP   = ((elementP != NULL) && (elementP->type == CorObject)) ? corTreeLookup(elementP, "value") : NULL;
+  CorNode*    valuesP  = aasParse(&ka, (jP->bodyText != NULL) ? jP->bodyText : jP->body);   // every value a string
+  CorNode*    typeP    = ((elementP != NULL) && (elementP->type == CorObject)) ? corTreeLookup(elementP, "modelType") : NULL;
+  const char* type     = ((typeP != NULL) && (typeP->type == CorString)) ? typeP->value.s : NULL;
+
+  free(got);
+
+  if ((type == NULL) || (strcmp(type, "SubmodelElementList") != 0) || ((itemsP != NULL) && (itemsP->type != CorArray)) || (valuesP == NULL) || (valuesP->type != CorArray))
+  {
+    *answerP = strdup("the element read is no SubmodelElementList");
+    corAllocBufferReset(&ka, false);
+    return 502;
+  }
+
+  //
+  // Each item the first one's copy (its modelType, valueType, semanticId), its value the new one; no item yet:
+  // a Property of the list's valueTypeListElement
+  //
+  CorNode* templateP = ((itemsP != NULL) && (itemsP->value.head != NULL)) ? itemsP->value.head : NULL;
+
+  if (templateP == NULL)
+  {
+    CorNode* vtP = corTreeLookup(elementP, "valueTypeListElement");
+
+    templateP = corTreeObject(&ka, NULL);
+    corTreeChildAdd(templateP, corTreeString(&ka, "modelType", "Property"));
+    corTreeChildAdd(templateP, corTreeString(&ka, "valueType", ((vtP != NULL) && (vtP->type == CorString)) ? vtP->value.s : "xs:string"));
+  }
+
+  CorNode* newP = corTreeArray(&ka, "value");
+
+  for (CorNode* vP = valuesP->value.head; vP != NULL; vP = vP->next)
+  {
+    CorNode* itemP  = corTreeClone(&ka, templateP);
+    CorNode* oldP   = (itemP != NULL) ? corTreeLookup(itemP, "value") : NULL;
+    char*    text   = (vP->type == CorString) ? vP->value.s : aasRender(vP);
+    CorNode* textP  = (text != NULL) ? corTreeString(&ka, "value", corAllocStrdup(&ka, text)) : NULL;
+
+    if ((text != NULL) && (vP->type != CorString))
+      free(text);
+
+    if ((itemP == NULL) || (textP == NULL))
+    {
+      corAllocBufferReset(&ka, false);
+      return 0;
+    }
+
+    if (oldP != NULL)
+      corTreeChildReplace(itemP, oldP, textP);
+    else
+      corTreeChildAdd(itemP, textP);
+
+    corTreeChildAdd(newP, itemP);
+  }
+
+  if (itemsP != NULL)
+    corTreeChildReplace(elementP, itemsP, newP);
+  else
+    corTreeChildAdd(elementP, newP);
+
+  char* body = aasRender(elementP);
+
+  corAllocBufferReset(&ka, false);
+
+  if (body == NULL)
+    return 0;
+
+  status = aasRequest(&target, "PUT", jP->path, body, answerP, TIMEOUT_MS);
+  free(body);
+
+  return status;
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
+// leafWrite - a write to the server: PATCH of the element's $value (the ValueOnly form); a list a PUT of the
+// element - read, its items replaced (neither BaSyx, 501, nor FA³ST, 204 and the old items kept when their number
+// changes, writes a list by its $value)
 //
 static void leafWrite(Job* jP)
 {
   char*       answer = NULL;
   const char* body   = ((valuesAsText == true) && (jP->bodyText != NULL)) ? jP->bodyText : jP->body;
-  int         status = aasRequest(&target, "PATCH", jP->path, body, &answer, TIMEOUT_MS);
+  const char* verb   = (jP->list == true) ? "PUT" : "PATCH";
+  int         status = (jP->list == true) ? listWrite(jP, &answer) : aasRequest(&target, "PATCH", jP->path, body, &answer, TIMEOUT_MS);
   bool        ok     = (status >= 200) && (status <= 299);
+
+  if (jP->list == true)
+    body = jP->body;
 
   //
   // Refused with a number or a boolean in it, by a server that is not refusing who we are or where we write: once
   // more with them as strings. Taken, every write to this server is sent so from now on
   //
-  if ((ok == false) && (status >= 400) && (status != 401) && (status != 403) && (status != 404) && (body != jP->bodyText) && (jP->bodyText != NULL))
+  if ((jP->list == false) && (ok == false) && (status >= 400) && (status != 401) && (status != 403) && (status != 404) && (body != jP->bodyText) && (jP->bodyText != NULL))
   {
     char* answerText = NULL;
     int   statusText = aasRequest(&target, "PATCH", jP->path, jP->bodyText, &answerText, TIMEOUT_MS);
@@ -563,11 +667,11 @@ static void leafWrite(Job* jP)
   }
 
   if (ok == true)
-    COR_V("aas: PATCH %s %s: %d", jP->path, body, status);
+    COR_V("aas: %s %s %s: %d", verb, jP->path, body, status);
   else if (status == 0)
-    COR_W("aas: PATCH %s %s: %s - the element is read back", jP->path, body, aasHttpError());
+    COR_W("aas: %s %s %s: %s - the element is read back", verb, jP->path, body, aasHttpError());
   else
-    COR_W("aas: PATCH %s %s: %d %.300s - the element is read back", jP->path, body, status, (answer != NULL) ? answer : "");
+    COR_W("aas: %s %s %s: %d %.300s - the element is read back", verb, jP->path, body, status, (answer != NULL) ? answer : "");
 
   free(answer);
 
@@ -1222,8 +1326,10 @@ int aasPublish(const char* nodeId, const char* json)
       jP->bodyText = aasValueOnlyText(&ka, kind, valueP);
       jP->echo   = aasValueAsRead(&ka, kind, valueType, valueP);
 
+      jP->list   = (kind == AasLeafList);
+
       if (jP->path != NULL)
-        snprintf(jP->path, len, "/submodels/%s/submodel-elements/%s/$value", b64, pathEnc);
+        snprintf(jP->path, len, "/submodels/%s/submodel-elements/%s%s", b64, pathEnc, (jP->list == true) ? "" : "/$value");
 
       free(b64);
       free(pathEnc);

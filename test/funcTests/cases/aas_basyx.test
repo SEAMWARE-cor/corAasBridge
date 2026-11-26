@@ -21,8 +21,8 @@
 #   - a LanguageProperty written in its ValueOnly form;
 #   - a change made at BaSyx comes in with the next poll;
 #   - the Operation registered as a service of the submodel's entity and executed through BaSyx's /invoke;
-#   - a write to the list: BaSyx does not implement $value on a SubmodelElementList (501) - the element is
-#     read back, the entity keeps what BaSyx has.
+#   - a write to the list, three items for two: written whole, a PUT of the element - BaSyx does not implement
+#     $value on a SubmodelElementList (501); BaSyx has the three.
 #
 # REQUIRE_FEATURE: ASSET_CHANNELS
 # REQUIRE_FEATURE: CHANNEL_WRITE_BACK
@@ -133,12 +133,12 @@ echo
 echo
 
 
-echo "06. PATCH tags - BaSyx does not implement \$value on a list (501): read back, the entity keeps BaSyx's"
-echo "====================================================================================================="
-attrPatch $SM_ID tags '{"type": "ListProperty", "valueList": ["hydraulic", "line-3"]}'
-for i in $(seq 1 50); do grep -q 'Tags/\$value.*501' "$AAS_TEST_DIR/broker.log" && break; sleep 0.1; done
-grep -o 'Tags/\$value \["hydraulic","line-3"\]: 501' "$AAS_TEST_DIR/broker.log"
-entityAwait $SM_ID tags line-2
+echo "06. PATCH tags, three items for two - the list written whole, a PUT of the element; BaSyx has the three"
+echo "======================================================================================================="
+attrPatch $SM_ID tags '{"type": "ListProperty", "valueList": ["hydraulic", "line-3", "press"]}'
+for i in $(seq 1 50); do curl -s "$SM/Tags" | grep -q press && break; sleep 0.1; done
+curl -s "$SM/Tags" | python3 -c 'import sys, json; print(json.dumps([x["value"] for x in json.load(sys.stdin)["value"]]))'
+entityAwait $SM_ID tags press
 entityGet $SM_ID tags keyValues
 echo
 echo
@@ -264,15 +264,16 @@ Scale https://acme.example/ids/sm/press-19/operational {"additionalProperties": 
 scale Factor=21
 
 
-06. PATCH tags - BaSyx does not implement $value on a list (501): read back, the entity keeps BaSyx's
-=====================================================================================================
+06. PATCH tags, three items for two - the list written whole, a PUT of the element; BaSyx has the three
+=======================================================================================================
 204
-Tags/$value ["hydraulic","line-3"]: 501
+["hydraulic", "line-3", "press"]
 {
   "id": "https://acme.example/ids/sm/press-19/operational",
   "tags": [
     "hydraulic",
-    "line-2"
+    "line-3",
+    "press"
   ],
   "type": "Operational"
 }
